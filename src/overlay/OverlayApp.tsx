@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Board, Note, Settings } from "../types";
 import RichText from "../RichText";
 import { dateLocale, setLocale, useT } from "../i18n";
@@ -12,6 +12,8 @@ export default function OverlayApp() {
     jsonPath: "",
     autoSave: true,
     opacity: 1,
+    alwaysOnTop: false,
+    previewSplit: 38,
     locale: "de",
   });
   const [toast, setToast] = useState<string | null>(null);
@@ -25,6 +27,9 @@ export default function OverlayApp() {
     y: number;
   } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [splitDragging, setSplitDragging] = useState(false);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const previewSplitRef = useRef(38);
   const t = useT();
 
   async function refresh() {
@@ -76,6 +81,39 @@ export default function OverlayApp() {
     () => board.notes.find((note) => note.id === selectedId) ?? null,
     [board.notes, selectedId],
   );
+
+  const previewSplit = Math.min(70, Math.max(22, settings.previewSplit ?? 38));
+  previewSplitRef.current = previewSplit;
+
+  useEffect(() => {
+    if (!splitDragging) return;
+    function onMove(e: PointerEvent) {
+      const el = workspaceRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const stacked = window.matchMedia("(max-width: 640px)").matches;
+      const ratio = stacked
+        ? (rect.bottom - e.clientY) / Math.max(1, rect.height)
+        : (rect.right - e.clientX) / Math.max(1, rect.width);
+      const next = Math.min(70, Math.max(22, Math.round(ratio * 100)));
+      previewSplitRef.current = next;
+      setSettings((current) =>
+        current.previewSplit === next ? current : { ...current, previewSplit: next },
+      );
+    }
+    function onUp() {
+      setSplitDragging(false);
+      void window.notesApi.setPreviewSplit(previewSplitRef.current);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [splitDragging]);
 
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -239,6 +277,25 @@ export default function OverlayApp() {
             {t("openAtLogin", "Mit Windows starten")}
           </label>
           <p>{t("autostartHint", "Im Entwicklungsmodus startet Windows die Datei start.bat (ein Terminal-Fenster ist normal).")}</p>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={Boolean(settings.alwaysOnTop)}
+              onChange={async (e) => {
+                const enabled = e.target.checked;
+                setSettings((current) => ({ ...current, alwaysOnTop: enabled }));
+                const next = await window.notesApi.setAlwaysOnTop(enabled);
+                setSettings((current) => ({ ...current, ...next }));
+                setToast(
+                  next.alwaysOnTop
+                    ? t("alwaysOnTopOn", "Dauerhaft im Vordergrund")
+                    : t("alwaysOnTopOff", "Vordergrund nur bis zum nächsten Klick daneben"),
+                );
+              }}
+            />
+            {t("alwaysOnTop", "Overlay dauerhaft im Vordergrund halten")}
+          </label>
+          <p>{t("alwaysOnTopHint", "Bleibt über anderen Fenstern. Ein Klick daneben verankert es dann nicht am Desktop.")}</p>
           <div className="slider-row">
             <div className="slider-head">
               <span>{t("opacity", "Deckkraft")}</span>
@@ -298,7 +355,11 @@ export default function OverlayApp() {
         </aside>
       ) : null}
 
-      <div className="workspace">
+      <div
+        className={`workspace${splitDragging ? " splitting" : ""}`}
+        ref={workspaceRef}
+        style={{ ["--preview-size" as string]: `${previewSplit}%` }}
+      >
       <div className="board">
         {board.groups.map((group) => (
           <GroupColumn
@@ -366,6 +427,22 @@ export default function OverlayApp() {
             }}
           />
         ))}
+      </div>
+      <div
+        className={`split-gutter${splitDragging ? " dragging" : ""}`}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t("resizePanes", "Größe von Notizen und Vorschau")}
+        aria-valuemin={22}
+        aria-valuemax={70}
+        aria-valuenow={previewSplit}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setSplitDragging(true);
+        }}
+      >
+        <span className="split-knob" />
       </div>
       <NotePreview
         note={selectedNote}

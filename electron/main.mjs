@@ -17,8 +17,22 @@ let dockTimer = null;
 let docking = false;
 let ignoreBlur = false;
 
+function isAlwaysOnTop() {
+  return db.getMeta("ui.alwaysOnTop") === "1";
+}
+
+function clampPreviewSplit(value) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return 38;
+  return Math.min(70, Math.max(22, Math.round(next)));
+}
+
+function getPreviewSplit() {
+  return clampPreviewSplit(db.getMeta("ui.previewSplit") || "38");
+}
+
 async function withOverlayNotTop(fn) {
-  const wasRaised = overlayRaised;
+  const wasRaised = overlayRaised || isAlwaysOnTop();
   ignoreBlur = true;
   if (wasRaised) overlayWindow?.setAlwaysOnTop(false);
   try {
@@ -147,8 +161,12 @@ function clampBounds(bounds) {
   return visible ? next : defaultOverlayBounds();
 }
 
-async function dockOverlay() {
+async function dockOverlay({ force = false } = {}) {
   if (!overlayWindow || overlayWindow.isDestroyed() || docking) return;
+  if (!force && isAlwaysOnTop()) {
+    raiseOverlay();
+    return;
+  }
   docking = true;
   overlayRaised = false;
   overlayWindow.setAlwaysOnTop(false);
@@ -165,7 +183,7 @@ async function dockOverlay() {
 
 function toggleOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  if (overlayRaised && overlayWindow.isFocused()) dockOverlay();
+  if (overlayRaised && overlayWindow.isFocused()) void dockOverlay({ force: true });
   else raiseOverlay();
 }
 
@@ -192,7 +210,7 @@ async function createOverlay() {
     frame: false,
     transparent: true,
     skipTaskbar: true,
-    alwaysOnTop: false,
+    alwaysOnTop: true,
     minimizable: false,
     maximizable: false,
     closable: false,
@@ -221,15 +239,15 @@ async function createOverlay() {
   overlayWindow.on("resized", saveOverlayBounds);
   overlayWindow.on("blur", () => {
     if (app.isQuitting || docking || ignoreBlur) return;
-    if (overlayRaised) void dockOverlay();
+    if (overlayRaised && !isAlwaysOnTop()) void dockOverlay();
   });
   overlayWindow.on("focus", () => {
-    if (app.isQuitting || docking || overlayRaised) return;
+    if (app.isQuitting || docking || overlayRaised || isAlwaysOnTop()) return;
     void pinAsDesktopGadget(overlayWindow, "bottom").catch(() => undefined);
   });
-  overlayWindow.on("ready-to-show", async () => {
+  overlayWindow.on("ready-to-show", () => {
     applyOpacity();
-    await dockOverlay();
+    raiseOverlay();
     overlayWindow.setSkipTaskbar(true);
   });
   overlayWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
@@ -358,9 +376,20 @@ function getSettings() {
   return {
     openAtLogin: getOpenAtLogin(),
     opacity: getOpacity(),
+    alwaysOnTop: isAlwaysOnTop(),
+    previewSplit: getPreviewSplit(),
     locale: i18n.getLocale(),
     ...jsonStore.getState(),
   };
+}
+
+function setAlwaysOnTopEnabled(enabled) {
+  db.setMeta("ui.alwaysOnTop", enabled ? "1" : "0");
+  if (enabled) raiseOverlay();
+}
+
+function setPreviewSplit(value) {
+  db.setMeta("ui.previewSplit", String(clampPreviewSplit(value)));
 }
 
 function quitApp() {
@@ -396,12 +425,42 @@ function quitApp() {
 function applyLocale(next) {
   const locale = next === "en" ? "en" : "de";
   db.setMeta("ui.locale", locale);
+  db.setMeta("ui.localeChosen", "1");
   i18n.setLocale(locale);
+  if (db.syncWelcomeNote(locale)) broadcastBoard();
   refreshTrayMenu();
   overlayWindow?.webContents.send("locale:changed", locale);
   for (const win of editorWindows.values()) {
     if (!win.isDestroyed()) win.webContents.send("locale:changed", locale);
   }
+}
+
+async function chooseInitialLocale() {
+  const saved = db.getMeta("ui.locale");
+  if (db.getMeta("ui.localeChosen") === "1" || saved) {
+    i18n.setLocale(saved === "en" ? "en" : "de");
+    if (saved) db.setMeta("ui.localeChosen", "1");
+    return;
+  }
+  if (!app.isPackaged) {
+    i18n.setLocale("de");
+    return;
+  }
+  const result = await dialog.showMessageBox({
+    type: "question",
+    noLink: true,
+    title: "Desktop Notes",
+    message: "Sprache wählen / Choose language",
+    detail:
+      "Welche Sprache soll Desktop Notes verwenden?\nWhich language should Desktop Notes use?\n\nDu kannst das später in den Einstellungen ändern.\nYou can change this later in Settings.",
+    buttons: ["Deutsch", "English"],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  const locale = result.response === 1 ? "en" : "de";
+  db.setMeta("ui.locale", locale);
+  db.setMeta("ui.localeChosen", "1");
+  i18n.setLocale(locale);
 }
 
 function refreshTrayMenu() {
@@ -507,7 +566,7 @@ function registerIpc() {
     broadcastBoard();
   });
   ipcMain.handle("editor:open", (_e, id) => openEditor(id));
-  ipcMain.handle("overlay:hide", () => dockOverlay());
+  ipcMain.handle("overlay:hide", () => dockOverlay({ force: true }));
   ipcMain.handle("overlay:raise", () => raiseOverlay());
   ipcMain.handle("settings:get", () => getSettings());
   ipcMain.handle("settings:setOpenAtLogin", (_e, enabled) => {
@@ -520,6 +579,14 @@ function registerIpc() {
   });
   ipcMain.handle("settings:setOpacity", (_e, value) => {
     setWindowOpacity(value);
+    return getSettings();
+  });
+  ipcMain.handle("settings:setAlwaysOnTop", (_e, enabled) => {
+    setAlwaysOnTopEnabled(Boolean(enabled));
+    return getSettings();
+  });
+  ipcMain.handle("settings:setPreviewSplit", (_e, value) => {
+    setPreviewSplit(value);
     return getSettings();
   });
   ipcMain.handle("settings:chooseJsonPath", async (_e, createNew) => {
@@ -564,9 +631,10 @@ if (!gotLock) {
       defaultPath: path.join(app.getPath("documents"), "Desktop Notes", "notes.json"),
       onExternal: () => broadcastBoard(),
     });
+    await chooseInitialLocale();
     db.seedIfEmpty();
     db.migrateUngroupedNotes();
-    i18n.setLocale(db.getMeta("ui.locale") || "de");
+    db.syncWelcomeNote(i18n.getLocale());
     if (db.getMeta("autostart") === "1") setOpenAtLogin(true);
     jsonStore.scheduleWrite();
     registerIpc();

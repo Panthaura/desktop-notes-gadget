@@ -8,10 +8,10 @@ Notizen bleiben lokal in SQLite und können fortlaufend in eine JSON-Datei gesch
 
 Nach `npm run dist` liegen die Dateien im Ordner `release/` (und zusätzlich unter `%LOCALAPPDATA%\desktop-notes-release`, falls der Desktop-Ordner gesperrt ist):
 
-- **Setup:** `Desktop Notes Setup 1.0.0.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
-- **Portable EXE:** `Desktop Notes 1.0.0.exe` – startet ohne Installation
+- **Setup:** `Desktop Notes Setup 1.0.1.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
+- **Portable EXE:** `Desktop Notes 1.0.1.exe` – startet ohne Installation
 
-Das Overlay passt sich beim Vergrößern und Verkleinern an: Gruppen-Spalten teilen sich den Platz, die Vorschau bleibt rechts (unter 640 px darunter). Es bleibt keine leere Spalte für eine nicht vorhandene Gruppe.
+Das Overlay passt sich beim Vergrößern und Verkleinern an: Gruppen-Spalten teilen sich den Platz, die Vorschau bleibt rechts (unter 640 px darunter). Es bleibt keine leere Spalte für eine nicht vorhandene Gruppe. Beim ersten Start der EXE kannst du Deutsch oder English wählen.
 
 Während der Entwicklung:
 
@@ -35,6 +35,7 @@ Oder Doppelklick auf `start.bat`. Voraussetzung ist Node.js.
 ## Einstellungen
 
 - Mit Windows starten
+- Overlay dauerhaft im Vordergrund
 - Deckkraft des Fensters
 - JSON automatisch speichern
 - JSON-Datei öffnen (Import) oder neue Datei anlegen

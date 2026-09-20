@@ -25,6 +25,26 @@ export function autoTitle(body) {
   return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line;
 }
 
+const WELCOME_BODIES = {
+  de: "Willkommen beim Desktop-Notes-Gadget.\n\nDoppelklick öffnet die Notiz in einem eigenen Fenster.\nKarten per Drag-and-Drop in Gruppen legen.\nEinstellungen: Autostart und JSON-Speicherort (z. B. Google Drive).",
+  en: "Welcome to the Desktop Notes gadget.\n\nDouble-click opens the note in its own window.\nDrag and drop cards into groups.\nSettings: autostart and JSON location (e.g. Google Drive).",
+};
+
+function normalizeBody(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+export function welcomeBody(locale = "de") {
+  return locale === "en" ? WELCOME_BODIES.en : WELCOME_BODIES.de;
+}
+
+function isWelcomeBody(text) {
+  const body = normalizeBody(text);
+  return body === WELCOME_BODIES.de || body === WELCOME_BODIES.en;
+}
+
 function all(sql, params = []) {
   const stmt = db.prepare(sql);
   stmt.bind(params);
@@ -133,14 +153,34 @@ export function seedIfEmpty() {
     "INSERT INTO groups (id, name, sortOrder, createdAt, updatedAt) VALUES (?, ?, 0, ?, ?)",
     [groupId, "Allgemein", created, created],
   );
-  const body =
-    "Willkommen beim Desktop-Notes-Gadget.\n\nDoppelklick öffnet die Notiz in einem eigenen Fenster.\nKarten per Drag-and-Drop in Gruppen legen.\nEinstellungen: Autostart und JSON-Speicherort (z. B. Google Drive).";
+  const locale = getMeta("ui.locale") === "en" ? "en" : "de";
+  const body = welcomeBody(locale);
+  const noteId = randomUUID();
   run(
     `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt)
      VALUES (?, ?, ?, 0, ?, 0, ?, ?)`,
-    [randomUUID(), groupId, autoTitle(body), body, created, created],
+    [noteId, groupId, autoTitle(body), body, created, created],
   );
+  setMeta("seed.welcomeNoteId", noteId);
   persist();
+  return true;
+}
+
+export function syncWelcomeNote(locale = "de") {
+  const wanted = welcomeBody(locale === "en" ? "en" : "de");
+  const savedId = getMeta("seed.welcomeNoteId");
+  let note = savedId ? getNote(savedId) : null;
+  if (!note) {
+    note =
+      getBoard().notes.find((item) => isWelcomeBody(item.body)) ?? null;
+  }
+  if (!note || !isWelcomeBody(note.body)) return false;
+  if (normalizeBody(note.body) === normalizeBody(wanted)) {
+    setMeta("seed.welcomeNoteId", note.id);
+    return false;
+  }
+  setMeta("seed.welcomeNoteId", note.id);
+  updateNote({ id: note.id, body: wanted, titleIsManual: false });
   return true;
 }
 

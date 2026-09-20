@@ -27,6 +27,8 @@ export type Settings = {
   jsonPath: string;
   autoSave: boolean;
   opacity: number;
+  alwaysOnTop: boolean;
+  previewSplit: number;
   locale: "de" | "en";
   cancelled?: boolean;
   imported?: boolean;

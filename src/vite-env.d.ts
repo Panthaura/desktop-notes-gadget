@@ -30,6 +30,8 @@ export type NotesApi = {
   setOpenAtLogin(enabled: boolean): Promise<Settings>;
   setAutoSave(enabled: boolean): Promise<Settings>;
   setOpacity(value: number): Promise<Settings>;
+  setAlwaysOnTop(enabled: boolean): Promise<Settings>;
+  setPreviewSplit(value: number): Promise<Settings>;
   setLocale(locale: "de" | "en"): Promise<Settings>;
   chooseJsonPath(createNew?: boolean): Promise<Settings>;
   confirm(payload: { title?: string; message: string; ok?: string }): Promise<boolean>;
