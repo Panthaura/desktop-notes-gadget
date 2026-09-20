@@ -7,6 +7,8 @@ const require = createRequire(import.meta.url);
 const initSqlJs = require("sql.js/dist/sql-asm.js");
 
 const TITLE_MAX = 40;
+const DEFAULT_GROUP_NAME = "Notes";
+const LEGACY_DEFAULT_NAMES = ["Notes", "Allgemein"];
 
 let db;
 let dbPath;
@@ -151,7 +153,7 @@ export function seedIfEmpty() {
   const groupId = randomUUID();
   run(
     "INSERT INTO groups (id, name, sortOrder, createdAt, updatedAt) VALUES (?, ?, 0, ?, ?)",
-    [groupId, "Allgemein", created, created],
+    [groupId, DEFAULT_GROUP_NAME, created, created],
   );
   const locale = getMeta("ui.locale") === "en" ? "en" : "de";
   const body = welcomeBody(locale);
@@ -162,6 +164,7 @@ export function seedIfEmpty() {
     [noteId, groupId, autoTitle(body), body, created, created],
   );
   setMeta("seed.welcomeNoteId", noteId);
+  setMeta("seed.defaultGroupId", groupId);
   persist();
   return true;
 }
@@ -204,11 +207,17 @@ export function getBoard() {
   const notes = all(
     "SELECT * FROM notes WHERE deletedAt IS NULL ORDER BY sortOrder ASC, createdAt ASC",
   ).map(mapNote);
-  return { groups, notes };
+  return { groups, notes, defaultGroupId: groups[0] ? resolveDefaultGroupId(groups) : null };
 }
 
 export function getNote(id) {
   return mapNote(one("SELECT * FROM notes WHERE id = ? AND deletedAt IS NULL", [id]));
+}
+
+function resolveDefaultGroupId(groups) {
+  const saved = getMeta("seed.defaultGroupId");
+  if (saved && groups.some((group) => group.id === saved)) return saved;
+  return groups.find((group) => LEGACY_DEFAULT_NAMES.includes(group.name))?.id ?? groups[0]?.id ?? null;
 }
 
 export function defaultGroupId() {
@@ -217,7 +226,20 @@ export function defaultGroupId() {
     seedIfEmpty();
     return getBoard().groups[0]?.id ?? null;
   }
-  return groups.find((group) => group.name === "Allgemein")?.id ?? groups[0].id;
+  return resolveDefaultGroupId(groups);
+}
+
+export function migrateDefaultGroup() {
+  const groups = getBoard().groups;
+  if (!groups.length) return;
+  const id = resolveDefaultGroupId(groups);
+  const group = groups.find((item) => item.id === id);
+  if (!group) return;
+  setMeta("seed.defaultGroupId", id);
+  if (group.name !== DEFAULT_GROUP_NAME) {
+    run("UPDATE groups SET name = ?, updatedAt = ? WHERE id = ?", [DEFAULT_GROUP_NAME, now(), id]);
+    persist();
+  }
 }
 
 export function migrateUngroupedNotes() {
@@ -320,9 +342,10 @@ export function renameGroup(id, name) {
 }
 
 export function deleteGroup(id) {
+  if (id === defaultGroupId()) return false;
   const others = getBoard().groups.filter((group) => group.id !== id);
   if (!others.length) return false;
-  const target = others.find((group) => group.name === "Allgemein")?.id ?? others[0].id;
+  const target = others.find((group) => group.id === defaultGroupId())?.id ?? others[0].id;
   const ts = now();
   run("UPDATE notes SET groupId = ?, updatedAt = ? WHERE groupId = ? AND deletedAt IS NULL", [
     target,
@@ -335,7 +358,10 @@ export function deleteGroup(id) {
 }
 
 export function reorderGroups(ids) {
-  ids.forEach((id, index) => {
+  const defaultId = defaultGroupId();
+  const rest = ids.filter((id) => id !== defaultId);
+  const ordered = defaultId ? [defaultId, ...rest] : rest;
+  ordered.forEach((id, index) => {
     run("UPDATE groups SET sortOrder = ?, updatedAt = ? WHERE id = ?", [index, now(), id]);
   });
   persist();

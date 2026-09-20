@@ -20,6 +20,7 @@ export type Note = {
 export type Board = {
   groups: Group[];
   notes: Note[];
+  defaultGroupId: string | null;
 };
 
 export type Settings = {

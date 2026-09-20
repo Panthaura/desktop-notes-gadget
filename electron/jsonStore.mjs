@@ -59,30 +59,16 @@ export function scheduleWrite() {
   timer = setTimeout(() => writeNow(), 250);
 }
 
-export async function chooseJsonPath(parent, { createNew = false } = {}) {
-  let nextPath = "";
-  if (createNew) {
-    const target = await dialog.showSaveDialog(parent ?? undefined, {
-      title: t("jsonCreateTitle", "Neue JSON-Datei anlegen"),
-      defaultPath: jsonPath || "notes.json",
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (target.canceled || !target.filePath) {
-      return { ...getState(), cancelled: true };
-    }
-    nextPath = target.filePath;
-  } else {
-    const target = await dialog.showOpenDialog(parent ?? undefined, {
-      title: t("jsonOpenTitle", "JSON-Datei zum Import wählen"),
-      defaultPath: jsonPath || "notes.json",
-      filters: [{ name: "JSON", extensions: ["json"] }],
-      properties: ["openFile"],
-    });
-    if (target.canceled || !target.filePaths?.[0]) {
-      return { ...getState(), cancelled: true };
-    }
-    nextPath = target.filePaths[0];
+export async function chooseJsonPath(parent) {
+  const target = await dialog.showSaveDialog(parent ?? undefined, {
+    title: t("jsonSaveAsTitle", "Datenbank speichern unter…"),
+    defaultPath: jsonPath || "notes.json",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (target.canceled || !target.filePath) {
+    return { ...getState(), cancelled: true };
   }
+  const nextPath = target.filePath;
 
   let snapshot = null;
   let prefer = "newer";

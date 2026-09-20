@@ -2,16 +2,16 @@
 
 Windows-Desktop-Gadget als Alternative zu Windows 11 Notes. Gelbe Notizkarten liegen als Overlay auf dem Desktop, mit Gruppen, Suche, Vorschau und einem eigenen Editor-Fenster.
 
-Notizen bleiben lokal in SQLite und können fortlaufend in eine JSON-Datei geschrieben werden (zum Beispiel in einem Google-Drive-Ordner).
+Notizen bleiben lokal in SQLite und können fortlaufend in eine JSON-Datei geschrieben werden. Standard ist der Installationsordner bzw. der Ordner der portablen EXE; der Speicherort lässt sich unter **Datenbank speichern unter…** ändern.
 
 ## Installation
 
 Nach `npm run dist` liegen die Dateien im Ordner `release/` (und zusätzlich unter `%LOCALAPPDATA%\desktop-notes-release`, falls der Desktop-Ordner gesperrt ist):
 
-- **Setup:** `Desktop Notes Setup 1.0.1.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
-- **Portable EXE:** `Desktop Notes 1.0.1.exe` – startet ohne Installation
+- **Setup:** `Desktop Notes Setup 1.0.2.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
+- **Portable EXE:** `Desktop Notes 1.0.2.exe` – startet ohne Installation
 
-Das Overlay passt sich beim Vergrößern und Verkleinern an: Gruppen-Spalten teilen sich den Platz, die Vorschau bleibt rechts (unter 640 px darunter). Es bleibt keine leere Spalte für eine nicht vorhandene Gruppe. Beim ersten Start der EXE kannst du Deutsch oder English wählen.
+Das Overlay passt sich beim Vergrößern und Verkleinern an: Die Notizen-Spalte und die Vorschau teilen sich den Platz (unter 640 px darunter). Gruppen liegen eingerückt unter dem Tab **Notes**, nicht als eigene Spalten. Beim ersten Start der EXE kannst du Deutsch oder English wählen.
 
 Während der Entwicklung:
 
@@ -30,7 +30,8 @@ Oder Doppelklick auf `start.bat`. Voraussetzung ist Node.js.
 - Doppelklick auf eine Karte öffnet den Editor
 - Rechtsklick auf eine Karte: löschen oder gesamten Inhalt kopieren
 - `https://`- und `mailto:`-Links in der Vorschau sind anklickbar
-- Zahlenfolgen mit mehr als zwei Ziffern haben ein Kopier-Symbol
+- Zahlenfolgen mit mehr als zwei Ziffern haben ein Kopier-Symbol; Bindestriche und ähnliche Zeichen dazwischen gehören zur gleichen Folge
+- Gruppen erscheinen eingerückt unter **Notes**; Karten per Drag-and-Drop hinein- und herausziehen
 
 ## Einstellungen
 
@@ -38,7 +39,7 @@ Oder Doppelklick auf `start.bat`. Voraussetzung ist Node.js.
 - Overlay dauerhaft im Vordergrund
 - Deckkraft des Fensters
 - JSON automatisch speichern
-- JSON-Datei öffnen (Import) oder neue Datei anlegen
+- Datenbank speichern unter… (Standard: Installations- bzw. EXE-Ordner)
 - Sprache: Deutsch oder English
 
 Beim Öffnen einer vorhandenen JSON-Datei werden Notizen importiert und mit den lokalen abgeglichen. Bei Duplikaten kannst du die neuere oder ältere Version behalten.

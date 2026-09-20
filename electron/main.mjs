@@ -9,13 +9,37 @@ import * as i18n from "./i18n.mjs";
 import * as jsonStore from "./jsonStore.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function portableDir() {
+  const dir = process.env.PORTABLE_EXECUTABLE_DIR;
+  return dir && typeof dir === "string" ? dir : "";
+}
+
+function appInstallDir() {
+  if (portableDir()) return portableDir();
+  if (app.isPackaged) return path.dirname(process.execPath);
+  return path.join(__dirname, "..");
+}
+
+function defaultDatabasePath() {
+  return path.join(appInstallDir(), "notes.json");
+}
+
+const portableRoot = portableDir();
+if (portableRoot) {
+  const userData = path.join(portableRoot, "data");
+  mkdirSync(userData, { recursive: true });
+  app.setPath("userData", userData);
+}
 const editorWindows = new Map();
 let overlayWindow = null;
 let tray = null;
 let overlayRaised = false;
 let dockTimer = null;
+let focusWatch = null;
 let docking = false;
 let ignoreBlur = false;
+let pinGeneration = 0;
 
 function isAlwaysOnTop() {
   return db.getMeta("ui.alwaysOnTop") === "1";
@@ -45,8 +69,22 @@ async function withOverlayNotTop(fn) {
   }
 }
 
+function clearAlwaysOnTop() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  try {
+    overlayWindow.setAlwaysOnTop(false);
+    if (overlayWindow.isAlwaysOnTop()) {
+      overlayWindow.setAlwaysOnTop(true, "normal");
+      overlayWindow.setAlwaysOnTop(false);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function raiseOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  pinGeneration += 1;
   overlayRaised = true;
   stopDockLoop();
   overlayWindow.setSkipTaskbar(true);
@@ -54,6 +92,8 @@ function raiseOverlay() {
   overlayWindow.show();
   overlayWindow.focus();
   overlayWindow.moveTop();
+  if (!isAlwaysOnTop()) startFocusWatch();
+  else stopFocusWatch();
   void pinAsDesktopGadget(overlayWindow, "tool").catch(() => undefined);
 }
 
@@ -169,15 +209,20 @@ async function dockOverlay({ force = false } = {}) {
   }
   docking = true;
   overlayRaised = false;
-  overlayWindow.setAlwaysOnTop(false);
+  stopFocusWatch();
+  clearAlwaysOnTop();
   overlayWindow.show();
+  const gen = ++pinGeneration;
   try {
     await pinAsDesktopGadget(overlayWindow, "bottom");
   } catch (err) {
     console.warn("Desktop-Pin fehlgeschlagen:", err);
   }
-  overlayWindow.setSkipTaskbar(true);
-  startDockLoop();
+  if (gen === pinGeneration && !overlayRaised && overlayWindow && !overlayWindow.isDestroyed()) {
+    clearAlwaysOnTop();
+    overlayWindow.setSkipTaskbar(true);
+    startDockLoop();
+  }
   docking = false;
 }
 
@@ -200,6 +245,30 @@ function stopDockLoop() {
   if (!dockTimer) return;
   clearInterval(dockTimer);
   dockTimer = null;
+}
+
+function startFocusWatch() {
+  if (focusWatch) return;
+  let missed = 0;
+  focusWatch = setInterval(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    if (!overlayRaised || isAlwaysOnTop() || docking || ignoreBlur) {
+      missed = 0;
+      return;
+    }
+    if (overlayWindow.isFocused()) {
+      missed = 0;
+      return;
+    }
+    missed += 1;
+    if (missed >= 2) void dockOverlay();
+  }, 200);
+}
+
+function stopFocusWatch() {
+  if (!focusWatch) return;
+  clearInterval(focusWatch);
+  focusWatch = null;
 }
 
 async function createOverlay() {
@@ -385,7 +454,11 @@ function getSettings() {
 
 function setAlwaysOnTopEnabled(enabled) {
   db.setMeta("ui.alwaysOnTop", enabled ? "1" : "0");
-  if (enabled) raiseOverlay();
+  if (enabled) {
+    raiseOverlay();
+    return;
+  }
+  if (overlayRaised) startFocusWatch();
 }
 
 function setPreviewSplit(value) {
@@ -396,6 +469,7 @@ function quitApp() {
   app.isQuitting = true;
   overlayRaised = false;
   stopDockLoop();
+  stopFocusWatch();
   try {
     overlayWindow?.setClosable(true);
   } catch {
@@ -589,10 +663,8 @@ function registerIpc() {
     setPreviewSplit(value);
     return getSettings();
   });
-  ipcMain.handle("settings:chooseJsonPath", async (_e, createNew) => {
-    const result = await withOverlayNotTop(() =>
-      jsonStore.chooseJsonPath(overlayWindow, { createNew: Boolean(createNew) }),
-    );
+  ipcMain.handle("settings:chooseJsonPath", async () => {
+    const result = await withOverlayNotTop(() => jsonStore.chooseJsonPath(overlayWindow));
     broadcastBoard();
     return result;
   });
@@ -628,12 +700,13 @@ if (!gotLock) {
     await db.openDatabase(app.getPath("userData"));
     db.setOnChange(() => jsonStore.scheduleWrite());
     jsonStore.initJsonStore({
-      defaultPath: path.join(app.getPath("documents"), "Desktop Notes", "notes.json"),
+      defaultPath: defaultDatabasePath(),
       onExternal: () => broadcastBoard(),
     });
     await chooseInitialLocale();
     db.seedIfEmpty();
     db.migrateUngroupedNotes();
+    db.migrateDefaultGroup();
     db.syncWelcomeNote(i18n.getLocale());
     if (db.getMeta("autostart") === "1") setOpenAtLogin(true);
     jsonStore.scheduleWrite();
@@ -656,6 +729,7 @@ app.on("before-quit", (event) => {
 app.on("will-quit", () => {
   app.isQuitting = true;
   stopDockLoop();
+  stopFocusWatch();
   globalShortcut.unregisterAll();
 });
 

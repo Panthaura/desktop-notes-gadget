@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
 import { t, useT } from "./i18n";
 
-const TOKEN_RE = /(https:\/\/[^\s<>"'\]\)]+|mailto:[^\s<>"']+|\+?\d{3,})/g;
+const TOKEN_RE = /(https:\/\/[^\s<>"'\]\)]+|mailto:[^\s<>"']+|\+?\d+(?:[.\-\/–]+\d+)*)/g;
+
+function digitCount(value: string) {
+  return (value.match(/\d/g) || []).length;
+}
 
 function trimUrl(url: string) {
   return url.replace(/[.,;:!?)]+$/g, "");
@@ -91,7 +95,7 @@ export default function RichText({
         </a>,
       );
       if (extra) nodes.push(extra);
-    } else {
+    } else if (digitCount(raw) >= 3) {
       nodes.push(
         <span key={`n-${key}`} className="rich-number">
           {raw}
@@ -110,6 +114,8 @@ export default function RichText({
           </button>
         </span>,
       );
+    } else {
+      nodes.push(raw);
     }
 
     key += 1;

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Note } from "../types";
 import RichText from "../RichText";
+import { useConfirm } from "../ConfirmDialog";
 import { dateLocale, setLocale, useT } from "../i18n";
 
 function formatStamp(ms: number) {
@@ -15,6 +16,7 @@ export default function EditorApp({ noteId }: { noteId: string }) {
   const [editingBody, setEditingBody] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const t = useT();
+  const [askConfirm, confirmDialog] = useConfirm();
   const saveTimer = useRef<number | null>(null);
   const titleRef = useRef(title);
   const bodyRef = useRef(body);
@@ -123,7 +125,7 @@ export default function EditorApp({ noteId }: { noteId: string }) {
           <button
             className="ghost-btn"
             onClick={async () => {
-              const ok = await window.notesApi.confirm({
+              const ok = await askConfirm({
                 title: t("deleteNote", "Notiz löschen"),
                 message: t("deleteNoteSimple", "Diese Notiz wirklich löschen?"),
                 ok: t("delete", "Löschen"),
@@ -154,6 +156,7 @@ export default function EditorApp({ noteId }: { noteId: string }) {
           <div className="editor-rich-hint">{t("editHint", "Zum Bearbeiten in den Text klicken")}</div>
         </div>
       )}
+      {confirmDialog}
       {copied ? <div className="toast">{copied}</div> : null}
     </div>
   );

@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld("notesApi", {
   setOpacity: (value) => ipcRenderer.invoke("settings:setOpacity", value),
   setAlwaysOnTop: (enabled) => ipcRenderer.invoke("settings:setAlwaysOnTop", enabled),
   setPreviewSplit: (value) => ipcRenderer.invoke("settings:setPreviewSplit", value),
-  chooseJsonPath: (createNew) => ipcRenderer.invoke("settings:chooseJsonPath", createNew),
+  chooseJsonPath: () => ipcRenderer.invoke("settings:chooseJsonPath"),
   setLocale: (locale) => ipcRenderer.invoke("settings:setLocale", locale),
   confirm: (payload) => ipcRenderer.invoke("dialog:confirm", payload),
   onBoardChanged: (cb) => {

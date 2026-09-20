@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Board, Note, Settings } from "../types";
+import type { Board, Group, Note, Settings } from "../types";
 import RichText from "../RichText";
+import { useConfirm } from "../ConfirmDialog";
 import { dateLocale, setLocale, useT } from "../i18n";
 
 export default function OverlayApp() {
-  const [board, setBoard] = useState<Board>({ groups: [], notes: [] });
+  const [board, setBoard] = useState<Board>({ groups: [], notes: [], defaultGroupId: null });
   const [query, setQuery] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<Settings>({
@@ -31,6 +32,7 @@ export default function OverlayApp() {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const previewSplitRef = useRef(38);
   const t = useT();
+  const [askConfirm, confirmDialog] = useConfirm();
 
   async function refresh() {
     const next = await window.notesApi.getBoard();
@@ -166,8 +168,12 @@ export default function OverlayApp() {
     setSettingsOpen((v) => !v);
   }
 
-  async function pickJsonPath(createNew: boolean) {
-    const next = await window.notesApi.chooseJsonPath(createNew);
+  const defaultGroupId = board.defaultGroupId ?? board.groups[0]?.id ?? null;
+  const defaultGroup = board.groups.find((group) => group.id === defaultGroupId) ?? null;
+  const nestedGroups = board.groups.filter((group) => group.id !== defaultGroupId);
+
+  async function pickJsonPath() {
+    const next = await window.notesApi.chooseJsonPath();
     if (next.cancelled) return;
     setSettings((current) => ({ ...current, ...next }));
     setToast(
@@ -184,6 +190,7 @@ export default function OverlayApp() {
       className="overlay-shell"
       onMouseDown={(e) => {
         const target = e.target as HTMLElement;
+        if (target.closest(".confirm-backdrop") || target.closest(".confirm-dialog")) return;
         if (menu && !target.closest(".note-menu")) setMenu(null);
         if (!settingsOpen) return;
         if (target.closest(".settings-panel") || target.closest("[data-settings-btn]")) return;
@@ -340,16 +347,13 @@ export default function OverlayApp() {
           <p>
             {t(
               "jsonHint",
-              "Lege den Speicherort z. B. in deinen Google-Drive-Ordner, dann wird die Datei dort laufend aktualisiert und in der Cloud gesichert. Existiert die Datei bereits, werden die Notizen importiert und mit den vorhandenen abgeglichen.",
+              "Standard ist der Ordner der App bzw. der portablen EXE. Mit „Datenbank speichern unter…“ wählst du z. B. einen Google-Drive-Ordner. Existiert die Datei bereits, werden die Notizen importiert und abgeglichen.",
             )}
           </p>
           <p className="path-line">{settings.jsonPath || t("jsonNone", "Kein Pfad gewählt")}</p>
           <div className="settings-row">
-            <button className="ghost-btn" onClick={() => void pickJsonPath(false)}>
-              {t("jsonOpen", "JSON-Datei öffnen (Import)")}
-            </button>
-            <button className="ghost-btn" onClick={() => void pickJsonPath(true)}>
-              {t("jsonCreate", "Neue JSON-Datei anlegen")}
+            <button className="ghost-btn" onClick={() => void pickJsonPath()}>
+              {t("jsonSaveAs", "Datenbank speichern unter…")}
             </button>
           </div>
         </aside>
@@ -361,49 +365,42 @@ export default function OverlayApp() {
         style={{ ["--preview-size" as string]: `${previewSplit}%` }}
       >
       <div className="board">
-        {board.groups.map((group) => (
-          <GroupColumn
-            key={group.id}
-            groupId={group.id}
-            title={group.name}
-            notes={notesIn(group.id)}
-            dropActive={dropGroup === group.id}
+        {defaultGroup ? (
+          <NotesColumn
+            title={defaultGroup.name || "Notes"}
+            defaultGroupId={defaultGroup.id}
+            rootNotes={notesIn(defaultGroup.id)}
+            groups={nestedGroups.map((group) => ({
+              group,
+              notes: notesIn(group.id),
+            }))}
+            dropGroup={dropGroup}
             draggingId={draggingId}
             selectedId={selectedId}
-            canDelete={board.groups.length > 1}
-            onRename={async (name) => {
-              await window.notesApi.renameGroup(group.id, name);
+            onRenameGroup={async (id, name) => {
+              await window.notesApi.renameGroup(id, name);
               await refresh();
             }}
-            onDelete={async () => {
-              if (board.groups.length <= 1) {
-                setToast(t("lastGroup", "Mindestens eine Gruppe muss bleiben"));
-                return;
-              }
-              const fallback =
-                board.groups.find((item) => item.id !== group.id && item.name === "Allgemein")
-                  ?.name ??
-                board.groups.find((item) => item.id !== group.id)?.name ??
-                "Allgemein";
-              const ok = await window.notesApi.confirm({
+            onDeleteGroup={async (group) => {
+              const ok = await askConfirm({
                 title: t("deleteGroup", "Gruppe löschen"),
                 message: t(
                   "deleteGroupMessage",
-                  "Gruppe „{name}“ löschen? Notizen landen in „{fallback}“.",
-                  { name: group.name, fallback },
+                  "Gruppe „{name}“ löschen? Die Notizen bleiben unter Notes.",
+                  { name: group.name },
                 ),
                 ok: t("delete", "Löschen"),
               });
               if (!ok) return;
               const removed = await window.notesApi.deleteGroup(group.id);
               if (!removed) {
-                setToast(t("lastGroup", "Mindestens eine Gruppe muss bleiben"));
+                setToast(t("lastGroup", "Die Gruppe Notes kann nicht gelöscht werden"));
                 return;
               }
               await refresh();
             }}
-            onAddNote={async () => {
-              const note = await window.notesApi.createNote(group.id);
+            onAddNote={async (groupId) => {
+              const note = await window.notesApi.createNote(groupId);
               setSelectedId(note.id);
               await window.notesApi.openEditor(note.id);
             }}
@@ -417,16 +414,21 @@ export default function OverlayApp() {
               setDraggingGroup(null);
               setDropGroup(null);
             }}
-            onDragOver={() => setDropGroup(group.id)}
-            onDropCard={(index) => void onDrop(group.id, index)}
-            onDropGroup={() => void onDropGroup(group.id)}
-            onGroupDragStart={setDraggingGroup}
+            onDragOverGroup={setDropGroup}
+            onDropCard={(groupId, index) => void onDrop(groupId, index)}
+            onDropGroup={(targetId) => void onDropGroup(targetId)}
+            onGroupDragStart={(id) => {
+              setDraggingId(null);
+              setDraggingGroup(id);
+            }}
             onOpenMenu={(note, x, y) => {
               setSettingsOpen(false);
               setMenu({ noteId: note.id, title: note.title, x, y });
             }}
           />
-        ))}
+        ) : (
+          <p className="empty-hint">{t("dropHint", "Karten hierher ziehen")}</p>
+        )}
       </div>
       <div
         className={`split-gutter${splitDragging ? " dragging" : ""}`}
@@ -459,7 +461,7 @@ export default function OverlayApp() {
             type="button"
             onClick={async () => {
               setMenu(null);
-              const ok = await window.notesApi.confirm({
+              const ok = await askConfirm({
                 title: t("deleteNote", "Notiz löschen"),
                 message: t("deleteNoteMessage", "„{title}“ wirklich löschen?", {
                   title: menu.title,
@@ -492,24 +494,108 @@ export default function OverlayApp() {
           </button>
         </div>
       ) : null}
+      {confirmDialog}
       {toast ? <div className="toast">{toast}</div> : null}
       <div className="resize-grip" title={t("resize", "Größe ändern")} />
     </div>
   );
 }
 
-function GroupColumn(props: {
+type NotesColumnProps = {
   title: string;
-  groupId?: string;
-  locked?: boolean;
-  canDelete?: boolean;
+  defaultGroupId: string;
+  rootNotes: Note[];
+  groups: { group: Group; notes: Note[] }[];
+  dropGroup: string | null;
+  draggingId: string | null;
+  selectedId: string | null;
+  onRenameGroup: (id: string, name: string) => void;
+  onDeleteGroup: (group: Group) => void;
+  onAddNote: (groupId: string) => void;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
+  onDragOverGroup: (id: string) => void;
+  onDropCard: (groupId: string, index: number) => void;
+  onDropGroup: (targetId: string) => void;
+  onGroupDragStart: (id: string) => void;
+  onSelect: (id: string) => void;
+  onOpenMenu: (note: Note, x: number, y: number) => void;
+};
+
+function NotesColumn(props: NotesColumnProps) {
+  const t = useT();
+  const total = props.rootNotes.length + props.groups.reduce((sum, item) => sum + item.notes.length, 0);
+
+  return (
+    <section
+      className={`column${props.dropGroup === props.defaultGroupId ? " drop-target" : ""}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        props.onDragOverGroup(props.defaultGroupId);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (props.draggingId) props.onDropCard(props.defaultGroupId, props.rootNotes.length);
+      }}
+    >
+      <div className="column-head">
+        <span className="column-title locked">{props.title}</span>
+        <span className="column-count">{total}</span>
+      </div>
+      <div className="cards">
+        {props.rootNotes.length === 0 && props.groups.length === 0 ? (
+          <div className="empty-hint">{t("dropHint", "Karten hierher ziehen")}</div>
+        ) : null}
+        {props.rootNotes.map((note, index) => (
+          <NoteCard
+            key={note.id}
+            note={note}
+            index={index}
+            draggingId={props.draggingId}
+            selectedId={props.selectedId}
+            onSelect={props.onSelect}
+            onDragStart={props.onDragStart}
+            onDragEnd={props.onDragEnd}
+            onDropCard={() => props.onDropCard(props.defaultGroupId, index)}
+            onOpenMenu={props.onOpenMenu}
+          />
+        ))}
+        {props.groups.map(({ group, notes }) => (
+          <NestedGroup
+            key={group.id}
+            group={group}
+            notes={notes}
+            dropActive={props.dropGroup === group.id}
+            draggingId={props.draggingId}
+            selectedId={props.selectedId}
+            onRename={(name) => props.onRenameGroup(group.id, name)}
+            onDelete={() => props.onDeleteGroup(group)}
+            onDragStart={props.onDragStart}
+            onDragEnd={props.onDragEnd}
+            onDragOver={() => props.onDragOverGroup(group.id)}
+            onDropCard={(index) => props.onDropCard(group.id, index)}
+            onDropGroup={() => props.onDropGroup(group.id)}
+            onGroupDragStart={props.onGroupDragStart}
+            onSelect={props.onSelect}
+            onOpenMenu={props.onOpenMenu}
+          />
+        ))}
+      </div>
+      <button className="ghost-btn column-add" onClick={() => props.onAddNote(props.defaultGroupId)}>
+        {t("addNote", "+ Notiz")}
+      </button>
+    </section>
+  );
+}
+
+function NestedGroup(props: {
+  group: Group;
   notes: Note[];
   dropActive: boolean;
   draggingId: string | null;
   selectedId: string | null;
   onRename: (name: string) => void;
   onDelete: () => void;
-  onAddNote: () => void;
   onDragStart: (id: string) => void;
   onDragEnd: () => void;
   onDragOver: () => void;
@@ -519,110 +605,127 @@ function GroupColumn(props: {
   onSelect: (id: string) => void;
   onOpenMenu: (note: Note, x: number, y: number) => void;
 }) {
-  const [name, setName] = useState(props.title);
-  useEffect(() => setName(props.title), [props.title]);
+  const [name, setName] = useState(props.group.name);
+  useEffect(() => setName(props.group.name), [props.group.name]);
   const t = useT();
 
   return (
-    <section
-      className={`column${props.dropActive ? " drop-target" : ""}`}
+    <div
+      className={`note-group${props.dropActive ? " drop-target" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         props.onDragOver();
       }}
       onDrop={(e) => {
         e.preventDefault();
-        if (props.locked) {
-          props.onDropCard(props.notes.length);
-          return;
-        }
+        e.stopPropagation();
         if (props.draggingId) props.onDropCard(props.notes.length);
         else props.onDropGroup();
       }}
     >
       <div
-        className="column-head"
-        draggable={!props.locked}
+        className="note-group-head"
+        draggable
         onDragStart={(e) => {
-          if (props.locked) return;
           e.dataTransfer.effectAllowed = "move";
-          props.onGroupDragStart(props.groupId ?? "");
+          props.onGroupDragStart(props.group.id);
         }}
       >
         <input
-          className="column-title"
+          className="note-group-title"
           value={name}
-          disabled={props.locked}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => {
-            if (!props.locked && name.trim() && name !== props.title) {
-              props.onRename(name.trim());
-            } else {
-              setName(props.title);
-            }
+            if (name.trim() && name !== props.group.name) props.onRename(name.trim());
+            else setName(props.group.name);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
         />
         <span className="column-count">{props.notes.length}</span>
-        {!props.locked && props.canDelete !== false ? (
-          <button className="icon-btn danger" onClick={props.onDelete} title={t("deleteGroup", "Gruppe löschen")}>
-            ×
-          </button>
-        ) : null}
+        <button className="icon-btn danger" onClick={props.onDelete} title={t("deleteGroup", "Gruppe löschen")}>
+          ×
+        </button>
       </div>
-      <div className="cards">
-        {props.notes.length === 0 ? (
-          <div className="empty-hint">{t("dropHint", "Karten hierher ziehen")}</div>
-        ) : null}
-        {props.notes.map((note, index) => (
-          <article
-            key={note.id}
-            className={`note-card${props.draggingId === note.id ? " dragging" : ""}${
-              props.selectedId === note.id ? " selected" : ""
-            }`}
-            style={{ zIndex: index + 1 }}
-            draggable
-            onClick={() => props.onSelect(note.id)}
-            onDragStart={(e) => {
-              e.dataTransfer.setData("text/plain", note.id);
-              e.dataTransfer.effectAllowed = "move";
-              props.onDragStart(note.id);
-            }}
-            onDragEnd={props.onDragEnd}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              props.onDropCard(index);
-            }}
-            onDoubleClick={() => void window.notesApi.openEditor(note.id)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              props.onSelect(note.id);
-              const shell = (e.currentTarget.closest(".overlay-shell") as HTMLElement | null);
-              const rect = shell?.getBoundingClientRect();
-              const x = rect ? e.clientX - rect.left : e.clientX;
-              const y = rect ? e.clientY - rect.top : e.clientY;
-              const maxX = Math.max(8, (rect?.width ?? 320) - 180);
-              const maxY = Math.max(8, (rect?.height ?? 240) - 140);
-              props.onOpenMenu(
-                note,
-                Math.min(Math.max(8, x), maxX),
-                Math.min(Math.max(8, y), maxY),
-              );
-            }}
-          >
-            <div className="note-title">{note.title || t("emptyNote", "Leere Notiz")}</div>
-          </article>
-        ))}
-      </div>
-      <button className="ghost-btn column-add" onClick={props.onAddNote}>
-        {t("addNote", "+ Notiz")}
-      </button>
-    </section>
+      {props.notes.length === 0 ? (
+        <div className="empty-hint nested">{t("dropHint", "Karten hierher ziehen")}</div>
+      ) : null}
+      {props.notes.map((note, index) => (
+        <NoteCard
+          key={note.id}
+          note={note}
+          index={index}
+          draggingId={props.draggingId}
+          selectedId={props.selectedId}
+          onSelect={props.onSelect}
+          onDragStart={props.onDragStart}
+          onDragEnd={props.onDragEnd}
+          onDropCard={() => props.onDropCard(index)}
+          onOpenMenu={props.onOpenMenu}
+        />
+      ))}
+    </div>
+  );
+}
+
+function NoteCard(props: {
+  note: Note;
+  index: number;
+  draggingId: string | null;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
+  onDropCard: () => void;
+  onOpenMenu: (note: Note, x: number, y: number) => void;
+}) {
+  const t = useT();
+  return (
+    <article
+      className={`note-card${props.draggingId === props.note.id ? " dragging" : ""}${
+        props.selectedId === props.note.id ? " selected" : ""
+      }`}
+      style={{ zIndex: props.index + 1 }}
+      draggable
+      onClick={() => props.onSelect(props.note.id)}
+      onDragStart={(e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData("text/plain", props.note.id);
+        e.dataTransfer.effectAllowed = "move";
+        props.onDragStart(props.note.id);
+      }}
+      onDragEnd={props.onDragEnd}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        props.onDropCard();
+      }}
+      onDoubleClick={() => void window.notesApi.openEditor(props.note.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        props.onSelect(props.note.id);
+        const shell = e.currentTarget.closest(".overlay-shell") as HTMLElement | null;
+        const rect = shell?.getBoundingClientRect();
+        const x = rect ? e.clientX - rect.left : e.clientX;
+        const y = rect ? e.clientY - rect.top : e.clientY;
+        const maxX = Math.max(8, (rect?.width ?? 320) - 180);
+        const maxY = Math.max(8, (rect?.height ?? 240) - 140);
+        props.onOpenMenu(
+          props.note,
+          Math.min(Math.max(8, x), maxX),
+          Math.min(Math.max(8, y), maxY),
+        );
+      }}
+    >
+      <div className="note-title">{props.note.title || t("emptyNote", "Leere Notiz")}</div>
+    </article>
   );
 }
 

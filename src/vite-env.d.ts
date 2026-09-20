@@ -33,7 +33,7 @@ export type NotesApi = {
   setAlwaysOnTop(enabled: boolean): Promise<Settings>;
   setPreviewSplit(value: number): Promise<Settings>;
   setLocale(locale: "de" | "en"): Promise<Settings>;
-  chooseJsonPath(createNew?: boolean): Promise<Settings>;
+  chooseJsonPath(): Promise<Settings>;
   confirm(payload: { title?: string; message: string; ok?: string }): Promise<boolean>;
   onBoardChanged(cb: () => void): () => void;
   onLocaleChanged(cb: (locale: "de" | "en") => void): () => void;

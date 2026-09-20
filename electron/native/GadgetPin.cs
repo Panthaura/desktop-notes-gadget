@@ -6,6 +6,7 @@ internal static class Program
     private const int GwlExStyle = -20;
     private const long WsExToolwindow = 0x00000080;
     private const long WsExAppwindow = 0x00040000;
+    private const long WsExTopmost = 0x00000008;
     private const uint SwpNosize = 0x0001;
     private const uint SwpNomove = 0x0002;
     private const uint SwpNozorder = 0x0004;
@@ -41,23 +42,23 @@ internal static class Program
             return 2;
         }
 
-        uint flags = SwpNomove | SwpNosize | SwpNoactivate | SwpFramechanged;
-        IntPtr insertAfter = IntPtr.Zero;
-        if (args.Length > 1 && args[1] == "bottom")
-        {
-            insertAfter = new IntPtr(1);
-        }
-        else
-        {
-            flags |= SwpNozorder;
-        }
-
         IntPtr hwnd = new IntPtr(hwndVal);
+        uint flags = SwpNomove | SwpNosize | SwpNoactivate | SwpFramechanged;
         long ex = GetWindowLongPtr(hwnd, GwlExStyle).ToInt64();
         ex |= WsExToolwindow;
         ex &= ~WsExAppwindow;
+
+        if (args.Length > 1 && args[1] == "bottom")
+        {
+            ex &= ~WsExTopmost;
+            SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(ex));
+            SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, flags);
+            SetWindowPos(hwnd, new IntPtr(1), 0, 0, 0, 0, flags);
+            return 0;
+        }
+
         SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(ex));
-        SetWindowPos(hwnd, insertAfter, 0, 0, 0, 0, flags);
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, flags | SwpNozorder);
         return 0;
     }
 }
