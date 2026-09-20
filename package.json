@@ -1,0 +1,88 @@
+{
+  "name": "desktop-notes-gadget",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop-Notes-Gadget fuer Windows",
+  "author": "Desktop Notes",
+  "main": "electron/main.mjs",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build",
+    "start": "electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run icon && node scripts/compile-pin.mjs && vite build && node scripts/package-win.mjs"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  },
+  "build": {
+    "appId": "desktop.notes.gadget",
+    "productName": "Desktop Notes",
+    "copyright": "Desktop Notes",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "src/i18n/en.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "src/i18n/en.json",
+        "to": "i18n/en.json"
+      },
+      {
+        "from": "electron/native/GadgetPin.exe",
+        "to": "GadgetPin.exe"
+      }
+    ],
+    "asarUnpack": [
+      "electron/native/**"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Desktop Notes",
+      "installerLanguages": [
+        "de_DE",
+        "en_US"
+      ],
+      "language": "1031"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+node_modules
+dist
+release
+build
+.DS_Store
+google-oauth.json
+electron/native/GadgetPin.exe
+tmp-data
+*.log
+.cursor
