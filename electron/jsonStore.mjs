@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -11,15 +10,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { dialog } from "electron";
+import * as backup from "./backup.mjs";
 import * as db from "./db.mjs";
 import { dateLocale, t } from "./i18n.mjs";
 
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
-const SIX_MONTH_MS = 182 * 24 * 60 * 60 * 1000;
-
 let jsonPath = "";
-let autoSave = true;
 let writing = false;
 let lastWriteAt = 0;
 let lastHash = "";
@@ -28,12 +23,12 @@ let watcher = null;
 let onExternalChange = null;
 
 export function getState() {
-  return { jsonPath, autoSave };
+  return { jsonPath, ...backup.getConfig() };
 }
 
 export function initJsonStore({ defaultPath, onExternal }) {
   onExternalChange = onExternal;
-  autoSave = db.getMeta("json.autoSave", "1") !== "0";
+  db.setMeta("json.autoSave", "1");
   jsonPath = db.getMeta("json.path") || defaultPath;
   if (!db.getMeta("json.path")) db.setMeta("json.path", jsonPath);
 
@@ -42,19 +37,12 @@ export function initJsonStore({ defaultPath, onExternal }) {
     if (empty) loadFromDisk({ replace: true });
     else mergeFromDisk();
   }
-  if (autoSave) writeNow();
-  else rotateBackups();
+  writeNow();
   startWatch();
 }
 
-export function setAutoSave(enabled) {
-  autoSave = Boolean(enabled);
-  db.setMeta("json.autoSave", autoSave ? "1" : "0");
-  if (autoSave) writeNow();
-}
-
 export function scheduleWrite() {
-  if (!autoSave || !jsonPath) return;
+  if (!jsonPath) return;
   clearTimeout(timer);
   timer = setTimeout(() => writeNow(), 250);
 }
@@ -162,91 +150,57 @@ function hashOf(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function backupPaths() {
-  const dir = path.dirname(jsonPath);
-  const base = path.basename(jsonPath, path.extname(jsonPath));
-  return {
-    dir,
-    weekly: path.join(dir, `${base}.weekly.json`),
-    monthly: path.join(dir, `${base}.monthly.json`),
-    sixPrefix: `${base}.6months-`,
-  };
+export function listBackups() {
+  return backup.listBackups(jsonPath);
 }
 
-function copyAtomic(from, to) {
-  const tmp = `${to}.tmp`;
-  copyFileSync(from, tmp);
-  try {
-    renameSync(tmp, to);
-  } catch {
-    copyFileSync(from, to);
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // ignore
-    }
-  }
+export function restoreBackup(id) {
+  const loaded = backup.readBackupSnapshot(jsonPath, id);
+  if (!loaded) return { ok: false };
+  db.replaceFromSnapshot(loaded.snapshot);
+  db.migrateDefaultGroup();
+  db.migrateUngroupedNotes();
+  writeNow();
+  return { ok: true, date: loaded.date };
 }
 
-function rotateBackups() {
-  try {
-    if (!jsonPath || !existsSync(jsonPath)) return;
-    const now = Date.now();
-    const names = backupPaths();
-    mkdirSync(names.dir, { recursive: true });
-
-    const weeklyAt = Number(db.getMeta("backup.weeklyAt") || "0");
-    if (!weeklyAt || now - weeklyAt >= WEEK_MS || !existsSync(names.weekly)) {
-      copyAtomic(jsonPath, names.weekly);
-      db.setMeta("backup.weeklyAt", String(now));
-    }
-
-    const monthlyAt = Number(db.getMeta("backup.monthlyAt") || "0");
-    if (!monthlyAt || now - monthlyAt >= MONTH_MS || !existsSync(names.monthly)) {
-      copyAtomic(jsonPath, names.monthly);
-      db.setMeta("backup.monthlyAt", String(now));
-    }
-
-    const sixAt = Number(db.getMeta("backup.sixAt") || "0");
-    if (!sixAt || now - sixAt >= SIX_MONTH_MS) {
-      const stamp = new Date(now).toISOString().slice(0, 10);
-      const sixPath = path.join(names.dir, `${names.sixPrefix}${stamp}.json`);
-      if (!existsSync(sixPath)) copyAtomic(jsonPath, sixPath);
-      db.setMeta("backup.sixAt", String(now));
-    }
-  } catch (err) {
-    console.warn("Backup fehlgeschlagen:", err);
-  }
+export function createBackup() {
+  writeNow({ rotate: false });
+  return backup.rotateBackups(jsonPath, { force: true });
 }
 
-function writeNow() {
+export function setBackupSchedule(patch) {
+  const next = backup.setConfig(patch);
+  backup.rotateBackups(jsonPath);
+  return next;
+}
+
+function writeNow({ rotate = true } = {}) {
   if (!jsonPath) return;
-  if (autoSave) {
-    const payload = JSON.stringify(db.exportSnapshot(), null, 2);
-    const hash = hashOf(payload);
-    if (hash !== lastHash) {
-      writing = true;
-      lastWriteAt = Date.now();
-      mkdirSync(path.dirname(jsonPath), { recursive: true });
-      const tmp = `${jsonPath}.tmp`;
-      writeFileSync(tmp, payload, "utf8");
+  const payload = JSON.stringify(db.exportSnapshot(), null, 2);
+  const hash = hashOf(payload);
+  if (hash !== lastHash) {
+    writing = true;
+    lastWriteAt = Date.now();
+    mkdirSync(path.dirname(jsonPath), { recursive: true });
+    const tmp = `${jsonPath}.tmp`;
+    writeFileSync(tmp, payload, "utf8");
+    try {
+      renameSync(tmp, jsonPath);
+    } catch {
+      writeFileSync(jsonPath, payload, "utf8");
       try {
-        renameSync(tmp, jsonPath);
+        unlinkSync(tmp);
       } catch {
-        writeFileSync(jsonPath, payload, "utf8");
-        try {
-          unlinkSync(tmp);
-        } catch {
-          // ignore
-        }
+        // ignore
       }
-      lastHash = hash;
-      setTimeout(() => {
-        writing = false;
-      }, 1500);
     }
+    lastHash = hash;
+    setTimeout(() => {
+      writing = false;
+    }, 1500);
   }
-  rotateBackups();
+  if (rotate) backup.rotateBackups(jsonPath);
 }
 
 function parseSnapshot() {

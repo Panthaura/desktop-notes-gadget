@@ -37,12 +37,95 @@ let tray = null;
 let overlayRaised = false;
 let dockTimer = null;
 let focusWatch = null;
+let dockCheckTimer = null;
 let docking = false;
 let ignoreBlur = false;
 let pinGeneration = 0;
 
 function isAlwaysOnTop() {
   return db.getMeta("ui.alwaysOnTop") === "1";
+}
+
+const DEFAULT_COLOR_BG = "#14110c";
+const DEFAULT_COLOR_ACCENT = "#f0c94d";
+
+function normalizeHex(value, fallback) {
+  const raw = String(value || "").trim();
+  const short = raw.match(/^#([0-9a-fA-F]{3})$/);
+  if (short) {
+    const [r, g, b] = short[1].split("");
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  const full = raw.match(/^#([0-9a-fA-F]{6})$/);
+  return full ? `#${full[1].toLowerCase()}` : fallback;
+}
+
+function getColors() {
+  return {
+    colorBg: normalizeHex(db.getMeta("ui.colorBg"), DEFAULT_COLOR_BG),
+    colorAccent: normalizeHex(db.getMeta("ui.colorAccent"), DEFAULT_COLOR_ACCENT),
+  };
+}
+
+function setColors(patch = {}) {
+  if (patch.colorBg != null) db.setMeta("ui.colorBg", normalizeHex(patch.colorBg, DEFAULT_COLOR_BG));
+  if (patch.colorAccent != null) {
+    db.setMeta("ui.colorAccent", normalizeHex(patch.colorAccent, DEFAULT_COLOR_ACCENT));
+  }
+  const next = getColors();
+  for (const win of editorWindows.values()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.setBackgroundColor(next.colorBg);
+    } catch {
+      // ignore
+    }
+  }
+  overlayWindow?.webContents.send("theme:changed", next);
+  for (const win of editorWindows.values()) {
+    if (!win.isDestroyed()) win.webContents.send("theme:changed", next);
+  }
+  return next;
+}
+
+function isAppFocused() {
+  try {
+    if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isFocused()) return true;
+  } catch {
+    // ignore
+  }
+  for (const win of editorWindows.values()) {
+    try {
+      if (!win.isDestroyed() && win.isFocused()) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+function syncEditorLayer() {
+  const onTop = overlayRaised || isAlwaysOnTop();
+  for (const win of editorWindows.values()) {
+    if (win.isDestroyed()) continue;
+    try {
+      if (onTop) win.setAlwaysOnTop(true, "screen-saver");
+      else win.setAlwaysOnTop(false);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function scheduleDockCheck() {
+  if (dockCheckTimer) clearTimeout(dockCheckTimer);
+  dockCheckTimer = setTimeout(() => {
+    dockCheckTimer = null;
+    if (app.isQuitting || docking || ignoreBlur) return;
+    if (!overlayRaised || isAlwaysOnTop()) return;
+    if (isAppFocused()) return;
+    void dockOverlay();
+  }, 120);
 }
 
 function clampPreviewSplit(value) {
@@ -82,7 +165,7 @@ function clearAlwaysOnTop() {
   }
 }
 
-function raiseOverlay() {
+function raiseOverlay({ focusOverlay = true } = {}) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   pinGeneration += 1;
   overlayRaised = true;
@@ -90,8 +173,23 @@ function raiseOverlay() {
   overlayWindow.setSkipTaskbar(true);
   overlayWindow.setAlwaysOnTop(true, "screen-saver");
   overlayWindow.show();
-  overlayWindow.focus();
-  overlayWindow.moveTop();
+  if (focusOverlay) {
+    overlayWindow.focus();
+    overlayWindow.moveTop();
+  }
+  syncEditorLayer();
+  if (!focusOverlay) {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && focused !== overlayWindow && !focused.isDestroyed()) {
+      try {
+        focused.setAlwaysOnTop(true, "screen-saver");
+        focused.moveTop();
+        focused.focus();
+      } catch {
+        // ignore
+      }
+    }
+  }
   if (!isAlwaysOnTop()) startFocusWatch();
   else stopFocusWatch();
   void pinAsDesktopGadget(overlayWindow, "tool").catch(() => undefined);
@@ -183,8 +281,8 @@ function defaultOverlayBounds() {
 }
 
 function clampBounds(bounds) {
-  const minW = 560;
-  const minH = 400;
+  const minW = 220;
+  const minH = 160;
   const next = {
     ...bounds,
     width: Math.max(minW, bounds.width || minW),
@@ -218,6 +316,7 @@ async function dockOverlay({ force = false } = {}) {
   } catch (err) {
     console.warn("Desktop-Pin fehlgeschlagen:", err);
   }
+  syncEditorLayer();
   if (gen === pinGeneration && !overlayRaised && overlayWindow && !overlayWindow.isDestroyed()) {
     clearAlwaysOnTop();
     overlayWindow.setSkipTaskbar(true);
@@ -256,7 +355,7 @@ function startFocusWatch() {
       missed = 0;
       return;
     }
-    if (overlayWindow.isFocused()) {
+    if (overlayWindow.isFocused() || isAppFocused()) {
       missed = 0;
       return;
     }
@@ -284,8 +383,8 @@ async function createOverlay() {
     maximizable: false,
     closable: false,
     resizable: true,
-    minWidth: 560,
-    minHeight: 400,
+    minWidth: 220,
+    minHeight: 160,
     focusable: true,
     roundedCorners: true,
     backgroundColor: "#00000000",
@@ -308,7 +407,7 @@ async function createOverlay() {
   overlayWindow.on("resized", saveOverlayBounds);
   overlayWindow.on("blur", () => {
     if (app.isQuitting || docking || ignoreBlur) return;
-    if (overlayRaised && !isAlwaysOnTop()) void dockOverlay();
+    if (overlayRaised && !isAlwaysOnTop()) scheduleDockCheck();
   });
   overlayWindow.on("focus", () => {
     if (app.isQuitting || docking || overlayRaised || isAlwaysOnTop()) return;
@@ -405,20 +504,30 @@ function getOpenAtLogin() {
 }
 
 async function openEditor(id) {
+  ignoreBlur = true;
+  const releaseBlur = () => {
+    setTimeout(() => {
+      ignoreBlur = false;
+    }, 400);
+  };
   const existing = editorWindows.get(id);
   if (existing && !existing.isDestroyed()) {
+    if (!overlayRaised && !isAlwaysOnTop()) raiseOverlay({ focusOverlay: false });
+    else syncEditorLayer();
     existing.show();
     existing.focus();
+    releaseBlur();
     return;
   }
   const note = db.getNote(id);
+  const colors = getColors();
   const win = new BrowserWindow({
     width: 720,
     height: 780,
     minWidth: 420,
     minHeight: 360,
     title: note?.title || "Notiz",
-    backgroundColor: "#14110c",
+    backgroundColor: colors.colorBg,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -429,8 +538,24 @@ async function openEditor(id) {
   });
   editorWindows.set(id, win);
   applyOpacity();
+  if (overlayRaised || isAlwaysOnTop()) {
+    try {
+      win.setAlwaysOnTop(true, "screen-saver");
+    } catch {
+      // ignore
+    }
+  } else {
+    raiseOverlay({ focusOverlay: false });
+  }
   win.on("closed", () => editorWindows.delete(id));
+  win.on("blur", () => scheduleDockCheck());
+  win.on("focus", () => {
+    if (app.isQuitting || docking) return;
+    if (!overlayRaised && !isAlwaysOnTop()) raiseOverlay({ focusOverlay: false });
+  });
   loadRenderer(win, { window: "editor", id });
+  win.once("ready-to-show", releaseBlur);
+  setTimeout(releaseBlur, 800);
 }
 
 function registerHotkey() {
@@ -447,7 +572,10 @@ function getSettings() {
     opacity: getOpacity(),
     alwaysOnTop: isAlwaysOnTop(),
     previewSplit: getPreviewSplit(),
+    compact: db.getMeta("ui.compact") === "1",
+    compactLocked: db.getMeta("ui.compactLocked") === "1",
     locale: i18n.getLocale(),
+    ...getColors(),
     ...jsonStore.getState(),
   };
 }
@@ -463,6 +591,32 @@ function setAlwaysOnTopEnabled(enabled) {
 
 function setPreviewSplit(value) {
   db.setMeta("ui.previewSplit", String(clampPreviewSplit(value)));
+}
+
+function setCompactMode(enabled, { locked = false } = {}) {
+  const on = Boolean(enabled);
+  db.setMeta("ui.compact", on ? "1" : "0");
+  db.setMeta("ui.compactLocked", on && locked ? "1" : "0");
+}
+
+function shrinkOverlayToNotes(size) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const bounds = overlayWindow.getBounds();
+  const width = Math.round(Number(size?.width) || 292);
+  const height = Math.round(Number(size?.height) || 320);
+  overlayWindow.setBounds(clampBounds({ ...bounds, width, height }));
+}
+
+function expandOverlayChrome() {
+  setCompactMode(false);
+  if (!overlayWindow || overlayWindow.isDestroyed()) return getSettings();
+  const bounds = overlayWindow.getBounds();
+  const width = Math.max(bounds.width, 640);
+  const height = Math.max(bounds.height, 480);
+  if (width !== bounds.width || height !== bounds.height) {
+    overlayWindow.setBounds(clampBounds({ ...bounds, width, height }));
+  }
+  return getSettings();
 }
 
 function quitApp() {
@@ -590,6 +744,17 @@ function registerIpc() {
     if (editor && !editor.isDestroyed()) editor.close();
     broadcastBoard();
   });
+  ipcMain.handle("notes:archived", () => db.listArchivedNotes());
+  ipcMain.handle("notes:restore", (_e, id) => {
+    const note = db.restoreNote(id);
+    broadcastBoard();
+    return note;
+  });
+  ipcMain.handle("notes:purge", (_e, id) => {
+    const ok = db.purgeNote(id);
+    if (ok) broadcastBoard();
+    return ok;
+  });
   ipcMain.handle("notes:get", (_e, id) => db.getNote(id));
   ipcMain.handle("notes:copy", (_e, id) => {
     const note = db.getNote(id);
@@ -642,13 +807,16 @@ function registerIpc() {
   ipcMain.handle("editor:open", (_e, id) => openEditor(id));
   ipcMain.handle("overlay:hide", () => dockOverlay({ force: true }));
   ipcMain.handle("overlay:raise", () => raiseOverlay());
+  ipcMain.handle("overlay:setCompact", (_e, payload) => {
+    const enabled = Boolean(payload?.enabled);
+    setCompactMode(enabled, { locked: Boolean(payload?.locked) });
+    if (enabled && (payload?.width || payload?.height)) shrinkOverlayToNotes(payload);
+    return getSettings();
+  });
+  ipcMain.handle("overlay:expandChrome", () => expandOverlayChrome());
   ipcMain.handle("settings:get", () => getSettings());
   ipcMain.handle("settings:setOpenAtLogin", (_e, enabled) => {
     setOpenAtLogin(enabled);
-    return getSettings();
-  });
-  ipcMain.handle("settings:setAutoSave", (_e, enabled) => {
-    jsonStore.setAutoSave(enabled);
     return getSettings();
   });
   ipcMain.handle("settings:setOpacity", (_e, value) => {
@@ -668,8 +836,23 @@ function registerIpc() {
     broadcastBoard();
     return result;
   });
+  ipcMain.handle("backups:list", () => jsonStore.listBackups());
+  ipcMain.handle("backups:restore", (_e, id) => {
+    const result = jsonStore.restoreBackup(id);
+    if (result.ok) broadcastBoard();
+    return result;
+  });
+  ipcMain.handle("backups:create", () => jsonStore.createBackup());
+  ipcMain.handle("backups:setSchedule", (_e, patch) => {
+    jsonStore.setBackupSchedule(patch);
+    return getSettings();
+  });
   ipcMain.handle("settings:setLocale", (_e, locale) => {
     applyLocale(locale);
+    return getSettings();
+  });
+  ipcMain.handle("settings:setColors", (_e, patch) => {
+    setColors(patch);
     return getSettings();
   });
   ipcMain.handle("dialog:confirm", async (event, payload) => {

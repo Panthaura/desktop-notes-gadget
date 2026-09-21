@@ -15,6 +15,7 @@ export type Note = {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
+  deletedAt?: number | null;
 };
 
 export type Board = {
@@ -26,12 +27,23 @@ export type Board = {
 export type Settings = {
   openAtLogin: boolean;
   jsonPath: string;
-  autoSave: boolean;
   opacity: number;
   alwaysOnTop: boolean;
   previewSplit: number;
+  compact?: boolean;
+  compactLocked?: boolean;
   locale: "de" | "en";
+  colorBg?: string;
+  colorAccent?: string;
+  backupIntervalDays?: number;
+  backupKeepCount?: number;
   cancelled?: boolean;
   imported?: boolean;
   conflicts?: number;
+};
+
+export type BackupInfo = {
+  id: string;
+  date: number;
+  kind: "weekly" | "monthly" | "archive" | "scheduled";
 };

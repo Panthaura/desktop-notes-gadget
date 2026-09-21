@@ -8,10 +8,10 @@ Notizen bleiben lokal in SQLite und können fortlaufend in eine JSON-Datei gesch
 
 Nach `npm run dist` liegen die Dateien im Ordner `release/` (und zusätzlich unter `%LOCALAPPDATA%\desktop-notes-release`, falls der Desktop-Ordner gesperrt ist):
 
-- **Setup:** `Desktop Notes Setup 1.0.2.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
-- **Portable EXE:** `Desktop Notes 1.0.2.exe` – startet ohne Installation
+- **Setup:** `Desktop Notes Setup 1.0.3.exe` – Installer mit Startmenü- und Desktop-Verknüpfung, Verzeichniswahl und deutscher Oberfläche
+- **Portable EXE:** `Desktop Notes 1.0.3.exe` – startet ohne Installation
 
-Das Overlay passt sich beim Vergrößern und Verkleinern an: Die Notizen-Spalte und die Vorschau teilen sich den Platz (unter 640 px darunter). Gruppen liegen eingerückt unter dem Tab **Notes**, nicht als eigene Spalten. Beim ersten Start der EXE kannst du Deutsch oder English wählen.
+Das Overlay passt sich beim Vergrößern und Verkleinern an: Die Notizen bleiben immer sichtbar. Menü und Vorschau blenden sich im Kompaktmodus aus. Gruppen liegen eingerückt unter dem Tab **Notes**. Beim ersten Start der EXE kannst du Deutsch oder English wählen.
 
 Während der Entwicklung:
 
@@ -25,7 +25,8 @@ Oder Doppelklick auf `start.bat`. Voraussetzung ist Node.js.
 ## Bedienung
 
 - Overlay einblenden: Linksklick auf das gelbe Tray-Icon, `Strg+Alt+N` oder `Strg+Umschalt+N`
-- Overlay am Desktop halten: **Ausblenden**
+- Overlay am Desktop halten: daneben klicken
+- Kompaktmodus: Button **Nur Notizen** oder das Fenster stark verkleinern – dann bleiben nur die Karten sichtbar
 - Beenden: Tray-Menü → **Beenden**
 - Doppelklick auf eine Karte öffnet den Editor
 - Rechtsklick auf eine Karte: löschen oder gesamten Inhalt kopieren
@@ -36,19 +37,15 @@ Oder Doppelklick auf `start.bat`. Voraussetzung ist Node.js.
 ## Einstellungen
 
 - Mit Windows starten
-- Overlay dauerhaft im Vordergrund
-- Deckkraft des Fensters
-- JSON automatisch speichern
-- Datenbank speichern unter… (Standard: Installations- bzw. EXE-Ordner)
-- Sprache: Deutsch oder English
+- Immer im Vordergrund
+- Transparenz
+- Datenbank speichern unter…
+- Backup: Intervall, Anzahl, wiederherstellen
+- Sprache: DE / EN
 
 Beim Öffnen einer vorhandenen JSON-Datei werden Notizen importiert und mit den lokalen abgeglichen. Bei Duplikaten kannst du die neuere oder ältere Version behalten.
 
-Backups entstehen im gleichen Ordner wie die JSON-Datei:
-
-- `notes.weekly.json` (wird überschrieben)
-- `notes.monthly.json` (wird überschrieben)
-- `notes.6months-JJJJ-MM-TT.json` (neue Datei, wird nicht überschrieben)
+Backups liegen im gleichen Ordner wie die JSON-Datei (`notes.backup-JJJJ-MM-TT.json`). Ältere weekly/monthly/6months-Dateien bleiben auswählbar. Es werden nur geänderte Stände gespeichert, und ältere Archive über der eingestellten Anzahl entfallen.
 
 ## Build
 

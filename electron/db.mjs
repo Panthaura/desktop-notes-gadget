@@ -90,6 +90,7 @@ function mapNote(row) {
     sortOrder: row.sortOrder,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    deletedAt: row.deletedAt ?? null,
   };
 }
 
@@ -314,6 +315,40 @@ export function deleteNote(id) {
   persist();
 }
 
+export function listArchivedNotes() {
+  return all(
+    "SELECT * FROM notes WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC, updatedAt DESC",
+  ).map(mapNote);
+}
+
+export function restoreNote(id) {
+  const row = one("SELECT * FROM notes WHERE id = ?", [id]);
+  if (!row?.deletedAt) return null;
+  const groups = getBoard().groups;
+  let groupId = row.groupId ?? null;
+  if (!groupId || !groups.some((group) => group.id === groupId)) {
+    groupId = defaultGroupId();
+  }
+  const max = one(
+    "SELECT COALESCE(MAX(sortOrder), -1) AS m FROM notes WHERE deletedAt IS NULL AND groupId = ?",
+    [groupId],
+  );
+  run(
+    "UPDATE notes SET deletedAt = NULL, groupId = ?, sortOrder = ?, updatedAt = ? WHERE id = ?",
+    [groupId, (max?.m ?? -1) + 1, now(), id],
+  );
+  persist();
+  return getNote(id);
+}
+
+export function purgeNote(id) {
+  const row = one("SELECT id FROM notes WHERE id = ? AND deletedAt IS NOT NULL", [id]);
+  if (!row) return false;
+  run("DELETE FROM notes WHERE id = ?", [id]);
+  persist();
+  return true;
+}
+
 export function createGroup(name) {
   const created = now();
   const max = one("SELECT COALESCE(MAX(sortOrder), -1) AS m FROM groups WHERE deletedAt IS NULL");
@@ -395,7 +430,7 @@ export function exportSnapshot() {
     version: 1,
     exportedAt: now(),
     groups: all("SELECT * FROM groups WHERE deletedAt IS NULL"),
-    notes: all("SELECT * FROM notes WHERE deletedAt IS NULL"),
+    notes: all("SELECT * FROM notes"),
   };
 }
 

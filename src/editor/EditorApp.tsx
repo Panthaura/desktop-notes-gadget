@@ -21,21 +21,33 @@ export default function EditorApp({ noteId }: { noteId: string }) {
   const titleRef = useRef(title);
   const bodyRef = useRef(body);
   const titleTouched = useRef(false);
+  const loaded = useRef(false);
+  const dirty = useRef(false);
   titleRef.current = title;
   bodyRef.current = body;
 
   useEffect(() => {
+    let cancelled = false;
+    loaded.current = false;
+    dirty.current = false;
     void (async () => {
-      const loaded = await window.notesApi.getNote(noteId);
-      if (!loaded) {
+      const loadedNote = await window.notesApi.getNote(noteId);
+      if (cancelled) return;
+      if (!loadedNote) {
         setMissing(true);
         return;
       }
-      titleTouched.current = loaded.titleIsManual;
-      setNote(loaded);
-      setTitle(loaded.title);
-      setBody(loaded.body);
+      titleTouched.current = loadedNote.titleIsManual;
+      titleRef.current = loadedNote.title;
+      bodyRef.current = loadedNote.body;
+      loaded.current = true;
+      setNote(loadedNote);
+      setTitle(loadedNote.title);
+      setBody(loadedNote.body);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [noteId]);
 
   useEffect(() => {
@@ -46,8 +58,8 @@ export default function EditorApp({ noteId }: { noteId: string }) {
   useEffect(() => {
     return window.notesApi.onBoardChanged(() => {
       void (async () => {
-        const loaded = await window.notesApi.getNote(noteId);
-        if (!loaded) window.close();
+        const loadedNote = await window.notesApi.getNote(noteId);
+        if (!loadedNote) window.close();
       })();
     });
   }, [noteId]);
@@ -55,6 +67,7 @@ export default function EditorApp({ noteId }: { noteId: string }) {
   useEffect(() => {
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      if (!loaded.current || !dirty.current) return;
       void window.notesApi.updateNote({
         id: noteId,
         title: titleRef.current,
@@ -65,6 +78,8 @@ export default function EditorApp({ noteId }: { noteId: string }) {
   }, [noteId]);
 
   function queueSave(nextTitle: string, nextBody: string) {
+    if (!loaded.current) return;
+    dirty.current = true;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       void window.notesApi
@@ -78,6 +93,9 @@ export default function EditorApp({ noteId }: { noteId: string }) {
           if (!saved) {
             window.close();
             return;
+          }
+          if (titleRef.current === nextTitle && bodyRef.current === nextBody) {
+            dirty.current = false;
           }
           setNote(saved);
         });
