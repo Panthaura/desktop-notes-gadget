@@ -41,6 +41,16 @@ let dockCheckTimer = null;
 let docking = false;
 let ignoreBlur = false;
 let pinGeneration = 0;
+/** After raiseOverlay: don't auto-dock until this timestamp (ms). Prevents "invisible app" on start. */
+let raiseHoldUntil = 0;
+
+function beginRaiseHold(ms = 2800) {
+  raiseHoldUntil = Date.now() + ms;
+}
+
+function isRaiseHoldActive() {
+  return Date.now() < raiseHoldUntil;
+}
 
 function isAlwaysOnTop() {
   return db.getMeta("ui.alwaysOnTop") === "1";
@@ -121,11 +131,11 @@ function scheduleDockCheck() {
   if (dockCheckTimer) clearTimeout(dockCheckTimer);
   dockCheckTimer = setTimeout(() => {
     dockCheckTimer = null;
-    if (app.isQuitting || docking || ignoreBlur) return;
+    if (app.isQuitting || docking || ignoreBlur || isRaiseHoldActive()) return;
     if (!overlayRaised || isAlwaysOnTop()) return;
     if (isAppFocused()) return;
     void dockOverlay();
-  }, 120);
+  }, 180);
 }
 
 function clampPreviewSplit(value) {
@@ -165,12 +175,14 @@ function clearAlwaysOnTop() {
   }
 }
 
-function raiseOverlay({ focusOverlay = true } = {}) {
+function raiseOverlay({ focusOverlay = true, holdMs = 2800 } = {}) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   pinGeneration += 1;
   overlayRaised = true;
+  beginRaiseHold(holdMs);
   stopDockLoop();
-  overlayWindow.setSkipTaskbar(true);
+  // While raised, show a taskbar entry so the app is discoverable (docked mode hides it again).
+  overlayWindow.setSkipTaskbar(false);
   overlayWindow.setAlwaysOnTop(true, "screen-saver");
   overlayWindow.show();
   if (focusOverlay) {
@@ -307,6 +319,7 @@ async function dockOverlay({ force = false } = {}) {
   }
   docking = true;
   overlayRaised = false;
+  raiseHoldUntil = 0;
   stopFocusWatch();
   clearAlwaysOnTop();
   overlayWindow.show();
@@ -351,7 +364,7 @@ function startFocusWatch() {
   let missed = 0;
   focusWatch = setInterval(() => {
     if (!overlayWindow || overlayWindow.isDestroyed()) return;
-    if (!overlayRaised || isAlwaysOnTop() || docking || ignoreBlur) {
+    if (!overlayRaised || isAlwaysOnTop() || docking || ignoreBlur || isRaiseHoldActive()) {
       missed = 0;
       return;
     }
@@ -360,7 +373,8 @@ function startFocusWatch() {
       return;
     }
     missed += 1;
-    if (missed >= 2) void dockOverlay();
+    // ~1.2s without focus before docking (was ~400ms and hid the app on launch)
+    if (missed >= 6) void dockOverlay();
   }, 200);
 }
 
@@ -406,7 +420,7 @@ async function createOverlay() {
   overlayWindow.on("moved", saveOverlayBounds);
   overlayWindow.on("resized", saveOverlayBounds);
   overlayWindow.on("blur", () => {
-    if (app.isQuitting || docking || ignoreBlur) return;
+    if (app.isQuitting || docking || ignoreBlur || isRaiseHoldActive()) return;
     if (overlayRaised && !isAlwaysOnTop()) scheduleDockCheck();
   });
   overlayWindow.on("focus", () => {
@@ -415,8 +429,8 @@ async function createOverlay() {
   });
   overlayWindow.on("ready-to-show", () => {
     applyOpacity();
-    raiseOverlay();
-    overlayWindow.setSkipTaskbar(true);
+    // Longer hold on cold start so Autostart / Explorer focus doesn't pin it behind immediately.
+    raiseOverlay({ holdMs: 4500 });
   });
   overlayWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
     console.error("Preload-Fehler", preloadPath, error);
@@ -716,11 +730,26 @@ function refreshTrayMenu() {
 }
 
 function createTray() {
-  const image = createYellowIcon();
+  const candidates = [
+    path.join(process.resourcesPath || "", "icon.png"),
+    path.join(__dirname, "..", "build", "icon.png"),
+    path.join(appInstallDir(), "resources", "icon.png"),
+  ];
+  let image = null;
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const loaded = nativeImage.createFromPath(file);
+    if (!loaded.isEmpty()) {
+      image = loaded.resize({ width: 32, height: 32 });
+      break;
+    }
+  }
+  if (!image || image.isEmpty()) image = createYellowIcon();
   tray = new Tray(image);
+  tray.setToolTip("Desktop Notes");
   refreshTrayMenu();
-  tray.on("click", () => raiseOverlay());
-  tray.on("double-click", () => raiseOverlay());
+  tray.on("click", () => raiseOverlay({ holdMs: 3500 }));
+  tray.on("double-click", () => raiseOverlay({ holdMs: 3500 }));
 }
 
 function registerIpc() {
@@ -876,7 +905,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    raiseOverlay();
+    raiseOverlay({ holdMs: 4000 });
   });
   app.whenReady().then(async () => {
     app.setAppUserModelId("desktop.notes.gadget");

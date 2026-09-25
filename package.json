@@ -1,6 +1,6 @@
 {
   "name": "desktop-notes-gadget",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "Desktop-Notes-Gadget fuer Windows",
   "author": "Desktop Notes",
@@ -49,6 +49,10 @@
       {
         "from": "electron/native/GadgetPin.exe",
         "to": "GadgetPin.exe"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "asarUnpack": [
