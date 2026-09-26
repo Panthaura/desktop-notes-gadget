@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { BackupInfo, Board, Group, Note, Settings } from "../types";
 import { useConfirm } from "../ConfirmDialog";
 import { dateLocale, setLocale, useT } from "../i18n";
-import { applyPalette, DEFAULT_COLOR_ACCENT, DEFAULT_COLOR_BG } from "../themeColors";
+import { applyPalette, DEFAULT_COLOR_ACCENT, DEFAULT_COLOR_BG, DEFAULT_COLOR_BLINK } from "../themeColors";
+import { formatRemindShort } from "../ctxmenu/menuShared";
+
+type NoteDensity = "full" | "small" | "initial";
 
 export default function OverlayApp() {
   const [board, setBoard] = useState<Board>({ groups: [], notes: [], defaultGroupId: null });
@@ -17,8 +20,10 @@ export default function OverlayApp() {
     compact: false,
     compactLocked: false,
     locale: "de",
+    appVersion: "",
     colorBg: DEFAULT_COLOR_BG,
     colorAccent: DEFAULT_COLOR_ACCENT,
+    colorBlink: DEFAULT_COLOR_BLINK,
     backupIntervalDays: 7,
     backupKeepCount: 8,
   });
@@ -30,20 +35,17 @@ export default function OverlayApp() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [draggingGroup, setDraggingGroup] = useState<string | null>(null);
   const [dropGroup, setDropGroup] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{
-    noteId: string;
-    title: string;
-    x: number;
-    y: number;
-  } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [splitDragging, setSplitDragging] = useState(false);
   const [compact, setCompact] = useState(false);
+  const [noteDensity, setNoteDensity] = useState<NoteDensity>("full");
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const previewSplitRef = useRef(38);
   const compactRef = useRef(false);
   const compactLockedRef = useRef(false);
+  const noteCountRef = useRef(0);
+  const wasCompactRef = useRef(false);
   const t = useT();
   const [askConfirm, confirmDialog] = useConfirm();
 
@@ -62,30 +64,38 @@ export default function OverlayApp() {
     const offBoard = window.notesApi.onBoardChanged(() => {
       void refresh();
     });
+    const offReminders = window.notesApi.onRemindersFired((payload) => {
+      const title = payload.title?.trim() || t("emptyNote", "Leere Notiz");
+      setToast(
+        payload.count === 1
+          ? t("remindFired", "Erinnerung: {title}", { title })
+          : t("remindFiredMany", "{n} Erinnerungen fällig", { n: payload.count }),
+      );
+    });
     const offLocale = window.notesApi.onLocaleChanged((locale) => {
       setLocale(locale);
       setSettings((current) => ({ ...current, locale }));
     });
+    const offSettings = window.notesApi.onOpenSettings(() => {
+      setSettingsOpen(true);
+      void window.notesApi.getSettings().then((next) => {
+        setSettings((current) => ({ ...current, ...next }));
+      });
+    });
     return () => {
       offBoard();
+      offReminders();
       offLocale();
+      offSettings();
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!toast) return;
-    const t = window.setTimeout(() => setToast(null), 3200);
-    return () => window.clearTimeout(t);
+    const longer = /Erinnerung|Reminder|Erinnerungen|reminders/i.test(toast);
+    const id = window.setTimeout(() => setToast(null), longer ? 6500 : 3200);
+    return () => window.clearTimeout(id);
   }, [toast]);
-
-  useEffect(() => {
-    if (!menu) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setMenu(null);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [menu]);
 
   useEffect(() => {
     if (selectedId && !board.notes.some((note) => note.id === selectedId)) {
@@ -105,54 +115,113 @@ export default function OverlayApp() {
   compactLockedRef.current = Boolean(settings.compactLocked);
 
   useEffect(() => {
-    function enterCompactIfStarved() {
-      if (compactRef.current) return;
-      const board = boardRef.current;
-      if (!board) return;
-      const rect = board.getBoundingClientRect();
-      if (rect.width < 8 && rect.height < 8) return;
-      if (rect.width < 140 || rect.height < 92) setCompact(true);
-    }
+    let expanding = false;
+    let liveRaf = 0;
 
-    function onResize() {
+    function applyAutoCompactState() {
       const w = window.innerWidth;
       const h = window.innerHeight;
       if (w < 400 || h < 300) {
-        setCompact(true);
+        if (!compactRef.current) setCompact(true);
         return;
       }
-      if (!compactLockedRef.current && w >= 520 && h >= 400) {
+      if (compactRef.current && w >= 520 && h >= 400) {
+        if (expanding) return;
+        expanding = true;
+        compactLockedRef.current = false;
         setCompact(false);
+        void window.notesApi
+          .clearCompact()
+          .then((next) => {
+            setSettings((current) => ({ ...current, ...next }));
+          })
+          .finally(() => {
+            expanding = false;
+          });
       }
-      window.requestAnimationFrame(enterCompactIfStarved);
     }
 
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    function onLiveResize() {
+      if (liveRaf) return;
+      liveRaf = window.requestAnimationFrame(() => {
+        liveRaf = 0;
+        // Live UI only — main process skips setBounds while the user is dragging.
+        applyAutoCompactState();
+      });
+    }
+
+    const offResized = window.notesApi.onOverlayResized(() => {
+      applyAutoCompactState();
+    });
+
+    applyAutoCompactState();
+    window.addEventListener("resize", onLiveResize);
+    return () => {
+      offResized();
+      window.removeEventListener("resize", onLiveResize);
+      if (liveRaf) window.cancelAnimationFrame(liveRaf);
+    };
   }, []);
 
   useEffect(() => {
     if (compact) setSettingsOpen(false);
   }, [compact]);
 
+  noteCountRef.current = board.notes.length;
+
   useEffect(() => {
-    if (!compact) return;
+    if (!compact) {
+      wasCompactRef.current = false;
+      setNoteDensity("full");
+      return;
+    }
     let cancelled = false;
-    const frame = window.requestAnimationFrame(() => {
+    const apply = () => {
+      if (cancelled) return;
+      const count = noteCountRef.current;
+      wasCompactRef.current = true;
+      const size = {
+        ...measureCompactSize(count),
+        // Never snap-shrink height on auto-enter (resize); explicit collapse passes forceHeight itself.
+        forceHeight: false,
+      };
+      void window.notesApi.setCompact(true, compactLockedRef.current, size).then((next) => {
+        setSettings((current) => ({ ...current, ...next }));
+      });
       window.requestAnimationFrame(() => {
         if (cancelled) return;
-        const size = measureCompactSize(boardRef.current);
-        void window.notesApi.setCompact(true, true, size).then((next) => {
-          setSettings((current) => ({ ...current, ...next }));
-        });
+        const cards = boardRef.current?.querySelector(".cards") as HTMLElement | null;
+        if (!cards) return;
+        const rect = cards.getBoundingClientRect();
+        setNoteDensity(pickNoteDensity(count, rect.width, rect.height));
       });
+    };
+    const frame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(apply);
     });
     return () => {
       cancelled = true;
       window.cancelAnimationFrame(frame);
     };
   }, [compact, board.notes.length]);
+
+  useEffect(() => {
+    const cards = boardRef.current?.querySelector(".cards");
+    if (!cards) return;
+    const ro = new ResizeObserver((entries) => {
+      if (!compactRef.current) {
+        setNoteDensity("full");
+        return;
+      }
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      const density = pickNoteDensity(noteCountRef.current, width, height);
+      setNoteDensity(density);
+    });
+    ro.observe(cards);
+    return () => ro.disconnect();
+  }, [compact, board.groups.length]);
 
   useEffect(() => {
     if (!splitDragging) return;
@@ -263,6 +332,10 @@ export default function OverlayApp() {
     setSettingsOpen((v) => !v);
   }
 
+  async function selectNote(id: string) {
+    setSelectedId(id);
+  }
+
   const defaultGroupId = board.defaultGroupId ?? board.groups[0]?.id ?? null;
   const defaultGroup = board.groups.find((group) => group.id === defaultGroupId) ?? null;
   const nestedGroups = board.groups.filter((group) => group.id !== defaultGroupId);
@@ -270,7 +343,11 @@ export default function OverlayApp() {
   async function collapseToNotes() {
     compactLockedRef.current = true;
     setCompact(true);
-    const next = await window.notesApi.setCompact(true, true);
+    const size = {
+      ...measureCompactSize(noteCountRef.current),
+      forceHeight: true,
+    };
+    const next = await window.notesApi.setCompact(true, true, size);
     setSettings((current) => ({ ...current, ...next }));
   }
 
@@ -283,7 +360,6 @@ export default function OverlayApp() {
       ok: t("delete", "Löschen"),
     });
     if (!ok) return;
-    setMenu(null);
     await window.notesApi.deleteNote(note.id);
     await refresh();
     if (settingsOpen) await loadArchived();
@@ -371,7 +447,6 @@ export default function OverlayApp() {
       onMouseDown={(e) => {
         const target = e.target as HTMLElement;
         if (target.closest(".confirm-backdrop") || target.closest(".confirm-dialog")) return;
-        if (menu && !target.closest(".note-menu")) setMenu(null);
         if (!settingsOpen) return;
         if (target.closest(".settings-panel") || target.closest("[data-settings-btn]")) return;
         setSettingsOpen(false);
@@ -387,6 +462,18 @@ export default function OverlayApp() {
           >
             <ExpandIcon />
             <span>{t("expandChrome", "Erweitern")}</span>
+          </button>
+          <button
+            type="button"
+            className="ghost-btn compact-add"
+            onClick={async () => {
+              const note = await window.notesApi.createNote(null);
+              setSelectedId(note.id);
+              await window.notesApi.openEditor(note.id);
+            }}
+            title={t("addNoteTitle", "Neue Notiz erstellen")}
+          >
+            {t("addNote", "+ Notiz")}
           </button>
         </div>
       ) : (
@@ -510,7 +597,11 @@ export default function OverlayApp() {
                 onChange={async (e) => {
                   const colorBg = e.target.value;
                   setSettings((current) => ({ ...current, colorBg }));
-                  applyPalette(colorBg, settings.colorAccent || DEFAULT_COLOR_ACCENT);
+                  applyPalette(
+                    colorBg,
+                    settings.colorAccent || DEFAULT_COLOR_ACCENT,
+                    settings.colorBlink || DEFAULT_COLOR_BLINK,
+                  );
                   const next = await window.notesApi.setColors({ colorBg });
                   setSettings((current) => ({ ...current, ...next }));
                 }}
@@ -524,8 +615,30 @@ export default function OverlayApp() {
                 onChange={async (e) => {
                   const colorAccent = e.target.value;
                   setSettings((current) => ({ ...current, colorAccent }));
-                  applyPalette(settings.colorBg || DEFAULT_COLOR_BG, colorAccent);
+                  applyPalette(
+                    settings.colorBg || DEFAULT_COLOR_BG,
+                    colorAccent,
+                    settings.colorBlink || DEFAULT_COLOR_BLINK,
+                  );
                   const next = await window.notesApi.setColors({ colorAccent });
+                  setSettings((current) => ({ ...current, ...next }));
+                }}
+              />
+            </label>
+            <label className="settings-inline">
+              <span>{t("colorBlink", "Blinkfarbe")}</span>
+              <input
+                type="color"
+                value={settings.colorBlink || DEFAULT_COLOR_BLINK}
+                onChange={async (e) => {
+                  const colorBlink = e.target.value;
+                  setSettings((current) => ({ ...current, colorBlink }));
+                  applyPalette(
+                    settings.colorBg || DEFAULT_COLOR_BG,
+                    settings.colorAccent || DEFAULT_COLOR_ACCENT,
+                    colorBlink,
+                  );
+                  const next = await window.notesApi.setColors({ colorBlink });
                   setSettings((current) => ({ ...current, ...next }));
                 }}
               />
@@ -533,10 +646,11 @@ export default function OverlayApp() {
             <button
               className="ghost-btn"
               onClick={async () => {
-                applyPalette(DEFAULT_COLOR_BG, DEFAULT_COLOR_ACCENT);
+                applyPalette(DEFAULT_COLOR_BG, DEFAULT_COLOR_ACCENT, DEFAULT_COLOR_BLINK);
                 const next = await window.notesApi.setColors({
                   colorBg: DEFAULT_COLOR_BG,
                   colorAccent: DEFAULT_COLOR_ACCENT,
+                  colorBlink: DEFAULT_COLOR_BLINK,
                 });
                 setSettings((current) => ({ ...current, ...next }));
               }}
@@ -684,6 +798,11 @@ export default function OverlayApp() {
               </button>
             </div>
           </div>
+          <p className="settings-version">
+            {t("appVersion", "Version {version}", {
+              version: settings.appVersion || "…",
+            })}
+          </p>
         </aside>
       ) : null}
 
@@ -692,7 +811,21 @@ export default function OverlayApp() {
         ref={workspaceRef}
         style={{ ["--preview-size" as string]: `${previewSplit}%` }}
       >
-      <div className="board" ref={boardRef}>
+      <div
+        className="board"
+        ref={boardRef}
+        onContextMenu={(e) => {
+          const target = e.target as HTMLElement;
+          if (target.closest(".note-card")) return;
+          e.preventDefault();
+          setSettingsOpen(false);
+          void window.notesApi.openCtxMenu({
+            kind: "shell",
+            x: e.screenX,
+            y: e.screenY,
+          });
+        }}
+      >
         {defaultGroup ? (
           <NotesColumn
             title={defaultGroup.name || "Notes"}
@@ -732,7 +865,7 @@ export default function OverlayApp() {
               setSelectedId(note.id);
               await window.notesApi.openEditor(note.id);
             }}
-            onSelect={setSelectedId}
+            onSelect={(id) => void selectNote(id)}
             onDragStart={(id) => {
               setDraggingGroup(null);
               setDraggingId(id);
@@ -749,12 +882,19 @@ export default function OverlayApp() {
               setDraggingId(null);
               setDraggingGroup(id);
             }}
-            onOpenMenu={(note, x, y) => {
+            onOpenMenu={(note, _clientX, _clientY, screenX, screenY) => {
               setSettingsOpen(false);
-              setMenu({ noteId: note.id, title: note.title, x, y });
+              void window.notesApi.openCtxMenu({
+                kind: "note",
+                noteId: note.id,
+                note,
+                x: screenX,
+                y: screenY,
+              });
             }}
             onDeleteNote={(note) => void deleteNote(note)}
             compact={compact}
+            density={noteDensity}
           />
         ) : (
           <p className="empty-hint">{t("dropHint", "Karten hierher ziehen")}</p>
@@ -782,42 +922,6 @@ export default function OverlayApp() {
         </>
       ) : null}
       </div>
-      {menu ? (
-        <div
-          className="note-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              const noteId = menu.noteId;
-              const title = menu.title;
-              setMenu(null);
-              void deleteNote({ id: noteId, title });
-            }}
-          >
-            {t("delete", "Löschen")}
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              const copied = await window.notesApi.copyNote(menu.noteId);
-              setMenu(null);
-              setToast(
-                copied
-                  ? t("noteCopied", "Notiz kopiert")
-                  : t("copyFailed", "Kopieren fehlgeschlagen"),
-              );
-            }}
-          >
-            {t("copy", "Kopieren")}
-          </button>
-          <button type="button" onClick={() => setMenu(null)}>
-            {t("cancel", "Abbrechen")}
-          </button>
-        </div>
-      ) : null}
       {confirmDialog}
       {toast ? <div className="toast">{toast}</div> : null}
       <div className="resize-grip" title={t("resize", "Größe ändern")} />
@@ -843,13 +947,15 @@ type NotesColumnProps = {
   onDropGroup: (targetId: string) => void;
   onGroupDragStart: (id: string) => void;
   onSelect: (id: string) => void;
-  onOpenMenu: (note: Note, x: number, y: number) => void;
+  onOpenMenu: (note: Note, clientX: number, clientY: number, screenX: number, screenY: number) => void;
   onDeleteNote: (note: Note) => void;
   compact?: boolean;
+  density?: NoteDensity;
 };
 
 function NotesColumn(props: NotesColumnProps) {
   const t = useT();
+  const density = props.density ?? "full";
   const total = props.rootNotes.length + props.groups.reduce((sum, item) => sum + item.notes.length, 0);
 
   return (
@@ -870,7 +976,7 @@ function NotesColumn(props: NotesColumnProps) {
         <span className="column-count">{total}</span>
       </div>
       ) : null}
-      <div className="cards">
+      <div className={`cards density-${density}`}>
         {props.rootNotes.length === 0 && props.groups.length === 0 ? (
           <div className="empty-hint">{t("dropHint", "Karten hierher ziehen")}</div>
         ) : null}
@@ -879,6 +985,7 @@ function NotesColumn(props: NotesColumnProps) {
             key={note.id}
             note={note}
             index={index}
+            density={density}
             draggingId={props.draggingId}
             selectedId={props.selectedId}
             onSelect={props.onSelect}
@@ -894,6 +1001,8 @@ function NotesColumn(props: NotesColumnProps) {
             key={group.id}
             group={group}
             notes={notes}
+            density={density}
+            compact={Boolean(props.compact)}
             dropActive={props.dropGroup === group.id}
             draggingId={props.draggingId}
             selectedId={props.selectedId}
@@ -923,6 +1032,8 @@ function NotesColumn(props: NotesColumnProps) {
 function NestedGroup(props: {
   group: Group;
   notes: Note[];
+  density?: NoteDensity;
+  compact?: boolean;
   dropActive: boolean;
   draggingId: string | null;
   selectedId: string | null;
@@ -935,16 +1046,19 @@ function NestedGroup(props: {
   onDropGroup: () => void;
   onGroupDragStart: (id: string) => void;
   onSelect: (id: string) => void;
-  onOpenMenu: (note: Note, x: number, y: number) => void;
+  onOpenMenu: (note: Note, clientX: number, clientY: number, screenX: number, screenY: number) => void;
   onDeleteNote: (note: Note) => void;
 }) {
   const [name, setName] = useState(props.group.name);
   useEffect(() => setName(props.group.name), [props.group.name]);
   const t = useT();
+  const density = props.density ?? "full";
 
   return (
     <div
-      className={`note-group${props.dropActive ? " drop-target" : ""}`}
+      className={`note-group${props.dropActive ? " drop-target" : ""}${
+        density === "initial" ? " note-group-initial" : ""
+      }`}
       onDragOver={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -957,6 +1071,7 @@ function NestedGroup(props: {
         else props.onDropGroup();
       }}
     >
+      {density !== "initial" ? (
       <div
         className="note-group-head"
         draggable
@@ -978,11 +1093,15 @@ function NestedGroup(props: {
           }}
         />
         <span className="column-count">{props.notes.length}</span>
-        <button className="icon-btn danger" onClick={props.onDelete} title={t("deleteGroup", "Gruppe löschen")}>
-          ×
-        </button>
+        {!props.compact ? (
+          <button className="icon-btn danger" onClick={props.onDelete} title={t("deleteGroup", "Gruppe löschen")}>
+            ×
+          </button>
+        ) : null}
       </div>
-      {props.notes.length === 0 ? (
+      ) : null}
+      <div className={`note-group-cards density-${density}`}>
+      {props.notes.length === 0 && density !== "initial" ? (
         <div className="empty-hint nested">{t("dropHint", "Karten hierher ziehen")}</div>
       ) : null}
       {props.notes.map((note, index) => (
@@ -990,6 +1109,7 @@ function NestedGroup(props: {
           key={note.id}
           note={note}
           index={index}
+          density={density}
           draggingId={props.draggingId}
           selectedId={props.selectedId}
           onSelect={props.onSelect}
@@ -1000,6 +1120,7 @@ function NestedGroup(props: {
           onDelete={props.onDeleteNote}
         />
       ))}
+      </div>
     </div>
   );
 }
@@ -1007,22 +1128,35 @@ function NestedGroup(props: {
 function NoteCard(props: {
   note: Note;
   index: number;
+  density?: NoteDensity;
   draggingId: string | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDragStart: (id: string) => void;
   onDragEnd: () => void;
   onDropCard: () => void;
-  onOpenMenu: (note: Note, x: number, y: number) => void;
+  onOpenMenu: (note: Note, clientX: number, clientY: number, screenX: number, screenY: number) => void;
   onDelete: (note: Note) => void;
 }) {
   const t = useT();
+  const density = props.density ?? "full";
+  const title = props.note.title || t("emptyNote", "Leere Notiz");
+  const initial = noteInitial(title);
+  const icon = props.note.icon?.trim() || "";
+  const color = props.note.color?.trim() || "";
+  const highlight = Boolean(props.note.highlight);
+  const remindAt = props.note.remindAt ?? null;
+
   return (
     <article
-      className={`note-card${props.draggingId === props.note.id ? " dragging" : ""}${
+      className={`note-card density-${density}${props.draggingId === props.note.id ? " dragging" : ""}${
         props.selectedId === props.note.id ? " selected" : ""
-      }`}
-      style={{ zIndex: props.index + 1 }}
+      }${highlight ? " highlight" : ""}${color ? " has-color" : ""}`}
+      style={{
+        zIndex: props.index + 1,
+        ...(color ? { ["--note-color" as string]: color } : {}),
+      }}
+      title={title}
       draggable
       onClick={() => props.onSelect(props.note.id)}
       onDragStart={(e) => {
@@ -1046,33 +1180,42 @@ function NoteCard(props: {
         e.preventDefault();
         e.stopPropagation();
         props.onSelect(props.note.id);
-        const shell = e.currentTarget.closest(".overlay-shell") as HTMLElement | null;
-        const rect = shell?.getBoundingClientRect();
-        const x = rect ? e.clientX - rect.left : e.clientX;
-        const y = rect ? e.clientY - rect.top : e.clientY;
-        const maxX = Math.max(8, (rect?.width ?? 320) - 180);
-        const maxY = Math.max(8, (rect?.height ?? 240) - 140);
-        props.onOpenMenu(
-          props.note,
-          Math.min(Math.max(8, x), maxX),
-          Math.min(Math.max(8, y), maxY),
-        );
+        props.onOpenMenu(props.note, e.clientX, e.clientY, e.screenX, e.screenY);
       }}
     >
-      <button
-        type="button"
-        className="note-card-delete"
-        title={t("delete", "Löschen")}
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          props.onDelete(props.note);
-        }}
-      >
-        ×
-      </button>
-      <div className="note-title">{props.note.title || t("emptyNote", "Leere Notiz")}</div>
+      {density !== "initial" ? (
+        <button
+          type="button"
+          className="note-card-delete"
+          title={t("delete", "Löschen")}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            props.onDelete(props.note);
+          }}
+        >
+          ×
+        </button>
+      ) : null}
+      {remindAt ? (
+        <span
+          className={`note-remind-badge${density === "initial" ? " compact-badge" : ""}`}
+          title={formatRemindShort(remindAt, t, dateLocale())}
+        >
+          {density === "initial" ? "⏰" : `⏰ ${formatRemindShort(remindAt, t, dateLocale())}`}
+        </span>
+      ) : null}
+      {density === "initial" ? (
+        <div className="note-initial" aria-label={title}>
+          {icon || initial}
+        </div>
+      ) : (
+        <div className="note-title">
+          {icon ? <span className="note-icon">{icon}</span> : null}
+          <span className="note-title-text">{title}</span>
+        </div>
+      )}
     </article>
   );
 }
@@ -1132,25 +1275,64 @@ function formatArchiveOption(item: Note, translate: (key: string, german: string
 }
 
 const NOTE_CARD_MAX = 260;
-const COMPACT_VISIBLE_NOTES = 10;
+/** Compact window always fits this many full-size notes (or fewer if less exist). */
+const COMPACT_FIT_NOTES = 5;
+/** App minimum height always fits at least this many full notes. */
+const COMPACT_MIN_NOTES = 2;
+const FULL_CARD_H = 48;
+const SMALL_CARD_H = 34;
+const INITIAL_TILE = 40;
+const CARD_GAP = 9;
+const SMALL_GAP = 6;
+/** Shell border 1+1 + board pad 6+6 + cards pad 8+8 — even L/R at min width. */
+const COMPACT_SIDE_CHROME = 30;
+/** Vertical pad under/above note stack in compact mode. */
+const COMPACT_V_PAD = 24;
 
-function measureCompactSize(board: HTMLDivElement | null) {
+function noteStackHeight(count: number) {
+  const n = Math.max(0, count);
+  if (n <= 0) return 0;
+  return n * FULL_CARD_H + Math.max(0, n - 1) * CARD_GAP;
+}
+
+function measureCompactSize(noteCount: number) {
   const bar = document.querySelector(".compact-bar");
   const barH = bar?.getBoundingClientRect().height ?? 32;
-  const cards = [...(board?.querySelectorAll(".note-card") ?? [])];
-  const gap = 9;
-  const visible = cards.slice(0, COMPACT_VISIBLE_NOTES);
-  let stack = 0;
-  visible.forEach((card, index) => {
-    stack += card.getBoundingClientRect().height;
-    if (index < visible.length - 1) stack += gap;
-  });
-  if (!visible.length) stack = 52;
-  const pad = 22;
+  const fit = Math.min(Math.max(noteCount, COMPACT_MIN_NOTES), COMPACT_FIT_NOTES);
+  const minHeight = Math.ceil(barH + noteStackHeight(COMPACT_MIN_NOTES) + COMPACT_V_PAD);
+  const height = Math.ceil(barH + noteStackHeight(fit) + COMPACT_V_PAD);
   return {
-    width: NOTE_CARD_MAX + 28,
-    height: Math.ceil(barH + stack + pad),
+    width: NOTE_CARD_MAX + COMPACT_SIDE_CHROME,
+    height: Math.max(minHeight, height),
+    minHeight,
   };
+}
+
+function noteInitial(title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) return "?";
+  const ch = [...trimmed][0] || "?";
+  return ch.toLocaleUpperCase();
+}
+
+function pickNoteDensity(noteCount: number, width: number, height: number): NoteDensity {
+  const n = Math.max(0, noteCount);
+  if (n <= COMPACT_FIT_NOTES) return "full";
+  if (width < 8 || height < 8) return "full";
+
+  const fullNeed = noteStackHeight(n);
+  if (fullNeed <= height) return "full";
+
+  const smallNeed = n * SMALL_CARD_H + Math.max(0, n - 1) * SMALL_GAP;
+  if (smallNeed <= height) return "small";
+
+  const cols = Math.max(1, Math.floor((width + SMALL_GAP) / (INITIAL_TILE + SMALL_GAP)));
+  const rows = Math.ceil(n / cols);
+  const gridNeed = rows * INITIAL_TILE + Math.max(0, rows - 1) * SMALL_GAP;
+  if (gridNeed <= height + 8) return "initial";
+
+  // Still cramped: stay on letter tiles so the grid can scroll.
+  return "initial";
 }
 
 function NotePreview({ note }: { note: Note | null }) {
@@ -1235,7 +1417,10 @@ function PreviewEditor({ note }: { note: Note }) {
           {t("open", "Öffnen")}
         </button>
       </div>
-      <div className="preview-paper">
+      <div
+        className={`preview-paper${note.color ? " has-color" : ""}`}
+        style={note.color ? { ["--note-color" as string]: note.color } : undefined}
+      >
         <input
           className="preview-title"
           value={title}

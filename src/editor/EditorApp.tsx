@@ -59,7 +59,24 @@ export default function EditorApp({ noteId }: { noteId: string }) {
     return window.notesApi.onBoardChanged(() => {
       void (async () => {
         const loadedNote = await window.notesApi.getNote(noteId);
-        if (!loadedNote) window.close();
+        if (!loadedNote) {
+          window.close();
+          return;
+        }
+        setNote((current) => {
+          if (!current) return loadedNote;
+          return {
+            ...loadedNote,
+            title: dirty.current ? current.title : loadedNote.title,
+            body: dirty.current ? current.body : loadedNote.body,
+            titleIsManual: dirty.current ? current.titleIsManual : loadedNote.titleIsManual,
+          };
+        });
+        if (!dirty.current) {
+          titleTouched.current = loadedNote.titleIsManual;
+          setTitle(loadedNote.title);
+          setBody(loadedNote.body);
+        }
       })();
     });
   }, [noteId]);
@@ -124,8 +141,13 @@ export default function EditorApp({ noteId }: { noteId: string }) {
     );
   }
 
+  const noteColor = note.color?.trim() || "";
+
   return (
-    <div className="editor-shell">
+    <div
+      className={`editor-shell${noteColor ? " has-color" : ""}`}
+      style={noteColor ? { ["--note-color" as string]: noteColor } : undefined}
+    >
       <div className="editor-bar">
         <input
           value={title}

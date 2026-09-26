@@ -8,6 +8,7 @@ const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const csPath = path.join(here, "native", "GadgetPin.cs");
 const csc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+const PIN_TIMEOUT_MS = 2500;
 
 function pinExeCandidates() {
   const local = path.join(here, "native", "GadgetPin.exe");
@@ -29,6 +30,14 @@ function hwndFromBuffer(handle) {
   return String(handle.readUInt32LE(0));
 }
 
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function compilePinHelper() {
   const existing = resolvePinExe();
   const stale =
@@ -45,8 +54,8 @@ export async function compilePinHelper() {
   return exePath;
 }
 
-export async function pinAsDesktopGadget(browserWindow, mode = "tool") {
+export async function pinAsDesktopGadget(browserWindow, mode = "tool", { timeoutMs = PIN_TIMEOUT_MS } = {}) {
   const hwnd = hwndFromBuffer(browserWindow.getNativeWindowHandle());
   const exe = await compilePinHelper();
-  await execFileAsync(exe, [hwnd, mode]);
+  await withTimeout(execFileAsync(exe, [hwnd, mode]), timeoutMs, "GadgetPin");
 }

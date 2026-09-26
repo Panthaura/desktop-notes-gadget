@@ -33,9 +33,16 @@ export function initJsonStore({ defaultPath, onExternal }) {
   if (!db.getMeta("json.path")) db.setMeta("json.path", jsonPath);
 
   const empty = db.isBoardEmpty();
+  let loaded = false;
   if (existsSync(jsonPath)) {
-    if (empty) loadFromDisk({ replace: true });
-    else mergeFromDisk();
+    if (empty) loaded = loadFromDisk({ replace: true });
+    else loaded = mergeFromDisk();
+    if (!loaded && empty) {
+      // Don't overwrite a broken/unreadable existing file with an empty board.
+      console.warn("JSON vorhanden, aber nicht lesbar – kein Überschreiben:", jsonPath);
+      startWatch();
+      return;
+    }
   }
   writeNow();
   startWatch();
@@ -177,30 +184,35 @@ export function setBackupSchedule(patch) {
 
 function writeNow({ rotate = true } = {}) {
   if (!jsonPath) return;
-  const payload = JSON.stringify(db.exportSnapshot(), null, 2);
-  const hash = hashOf(payload);
-  if (hash !== lastHash) {
-    writing = true;
-    lastWriteAt = Date.now();
-    mkdirSync(path.dirname(jsonPath), { recursive: true });
-    const tmp = `${jsonPath}.tmp`;
-    writeFileSync(tmp, payload, "utf8");
-    try {
-      renameSync(tmp, jsonPath);
-    } catch {
-      writeFileSync(jsonPath, payload, "utf8");
+  try {
+    const payload = JSON.stringify(db.exportSnapshot(), null, 2);
+    const hash = hashOf(payload);
+    if (hash !== lastHash) {
+      writing = true;
+      lastWriteAt = Date.now();
+      mkdirSync(path.dirname(jsonPath), { recursive: true });
+      const tmp = `${jsonPath}.tmp`;
+      writeFileSync(tmp, payload, "utf8");
       try {
-        unlinkSync(tmp);
+        renameSync(tmp, jsonPath);
       } catch {
-        // ignore
+        writeFileSync(jsonPath, payload, "utf8");
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // ignore
+        }
       }
+      lastHash = hash;
+      setTimeout(() => {
+        writing = false;
+      }, 1500);
     }
-    lastHash = hash;
-    setTimeout(() => {
-      writing = false;
-    }, 1500);
+    if (rotate) backup.rotateBackups(jsonPath);
+  } catch (err) {
+    writing = false;
+    console.warn("JSON speichern fehlgeschlagen:", err?.message || err);
   }
-  if (rotate) backup.rotateBackups(jsonPath);
 }
 
 function parseSnapshot() {
@@ -216,6 +228,8 @@ function loadFromDisk({ replace }) {
     if (!snapshot?.notes && !snapshot?.groups) return false;
     if (replace) db.replaceFromSnapshot(snapshot);
     else db.mergeSnapshot(snapshot);
+    db.migrateDefaultGroup();
+    db.migrateUngroupedNotes();
     lastHash = hash;
     return true;
   } catch (err) {

@@ -16,6 +16,10 @@ export type Note = {
   createdAt: number;
   updatedAt: number;
   deletedAt?: number | null;
+  color: string | null;
+  icon: string | null;
+  highlight: boolean;
+  remindAt: number | null;
 };
 
 export type Board = {
@@ -33,8 +37,10 @@ export type Settings = {
   compact?: boolean;
   compactLocked?: boolean;
   locale: "de" | "en";
+  appVersion?: string;
   colorBg?: string;
   colorAccent?: string;
+  colorBlink?: string;
   backupIntervalDays?: number;
   backupKeepCount?: number;
   cancelled?: boolean;

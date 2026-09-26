@@ -12,6 +12,10 @@ export type NotesApi = {
     groupId?: string | null;
     sortOrder?: number;
     titleIsManual?: boolean;
+    color?: string | null;
+    icon?: string | null;
+    highlight?: boolean;
+    remindAt?: number | null;
   }): Promise<Note | null>;
   deleteNote(id: string): Promise<void>;
   listArchivedNotes(): Promise<Note[]>;
@@ -26,8 +30,49 @@ export type NotesApi = {
   openEditor(id: string): Promise<void>;
   hideOverlay(): Promise<void>;
   raiseOverlay(): Promise<void>;
-  setCompact(enabled: boolean, locked?: boolean, size?: { width: number; height: number }): Promise<Settings>;
+  setCompact(
+    enabled: boolean,
+    locked?: boolean,
+    size?: { width: number; height: number; minHeight?: number; forceHeight?: boolean },
+  ): Promise<Settings>;
+  clearCompact(): Promise<Settings>;
   expandChrome(): Promise<Settings>;
+  fitMenuSpace(payload: {
+    menuLeft: number;
+    menuTop: number;
+    menuWidth: number;
+    menuHeight: number;
+  }): Promise<{ x: number; y: number; width: number; height: number } | null>;
+  restoreMenuSpace(): Promise<void>;
+  openCtxMenu(payload: {
+    kind: "note" | "shell";
+    noteId?: string;
+    note?: Note;
+    x: number;
+    y: number;
+  }): Promise<void>;
+  closeCtxMenu(): Promise<void>;
+  resizeCtxMenu(size: { width: number; height: number }): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>;
+  ctxMenuReady(size: { width: number; height: number }): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>;
+  takeCtxPresent(): Promise<{
+    kind: "note" | "shell";
+    note: Note | null;
+    colors: { colorBg: string; colorAccent: string; colorBlink: string };
+    locale: "de" | "en";
+    x?: number;
+    y?: number;
+  } | null>;
+  openOverlaySettings(): Promise<void>;
   copyNote(id: string): Promise<boolean>;
   copyText(text: string): Promise<boolean>;
   openLink(url: string): Promise<boolean>;
@@ -37,7 +82,11 @@ export type NotesApi = {
   setAlwaysOnTop(enabled: boolean): Promise<Settings>;
   setPreviewSplit(value: number): Promise<Settings>;
   setLocale(locale: "de" | "en"): Promise<Settings>;
-  setColors(patch: { colorBg?: string; colorAccent?: string }): Promise<Settings>;
+  setColors(patch: {
+    colorBg?: string;
+    colorAccent?: string;
+    colorBlink?: string;
+  }): Promise<Settings>;
   chooseJsonPath(): Promise<Settings>;
   listBackups(): Promise<BackupInfo[]>;
   restoreBackup(id: string): Promise<{ ok: boolean; date?: number }>;
@@ -48,8 +97,24 @@ export type NotesApi = {
   }): Promise<Settings>;
   confirm(payload: { title?: string; message: string; ok?: string }): Promise<boolean>;
   onBoardChanged(cb: () => void): () => void;
+  onRemindersFired(cb: (payload: { count: number; title: string }) => void): () => void;
   onLocaleChanged(cb: (locale: "de" | "en") => void): () => void;
-  onThemeChanged(cb: (payload: { colorBg: string; colorAccent: string }) => void): () => void;
+  onThemeChanged(
+    cb: (payload: { colorBg: string; colorAccent: string; colorBlink: string }) => void,
+  ): () => void;
+  onOpenSettings(cb: () => void): () => void;
+  onOverlayResized(cb: () => void): () => void;
+  onOpacityChanged(cb: (opacity: number) => void): () => void;
+  onCtxMenuPresent(
+    cb: (payload: {
+      kind: "note" | "shell";
+      note: Note | null;
+      colors: { colorBg: string; colorAccent: string; colorBlink: string };
+      locale: "de" | "en";
+      x?: number;
+      y?: number;
+    }) => void,
+  ): () => void;
 };
 
 declare global {

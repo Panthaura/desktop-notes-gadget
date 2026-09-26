@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -67,8 +67,20 @@ function one(sql, params = []) {
 }
 
 function persist(notify = true) {
-  const data = db.export();
-  writeFileSync(dbPath, Buffer.from(data));
+  const data = Buffer.from(db.export());
+  mkdirSync(path.dirname(dbPath), { recursive: true });
+  const tmp = `${dbPath}.tmp`;
+  writeFileSync(tmp, data);
+  try {
+    renameSync(tmp, dbPath);
+  } catch {
+    writeFileSync(dbPath, data);
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+  }
   if (notify && !skipNotify) onChange?.();
 }
 
@@ -91,7 +103,31 @@ function mapNote(row) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
+    color: row.color ?? null,
+    icon: row.icon ?? null,
+    highlight: Boolean(row.highlight),
+    remindAt: row.remindAt == null ? null : Number(row.remindAt),
   };
+}
+
+function tableHasColumn(table, column) {
+  return all(`PRAGMA table_info(${table})`).some((col) => col.name === column);
+}
+
+export function migrateNoteExtras() {
+  const columns = [
+    ["color", "TEXT"],
+    ["icon", "TEXT"],
+    ["highlight", "INTEGER NOT NULL DEFAULT 0"],
+    ["remindAt", "INTEGER"],
+  ];
+  let changed = false;
+  for (const [name, def] of columns) {
+    if (tableHasColumn("notes", name)) continue;
+    run(`ALTER TABLE notes ADD COLUMN ${name} ${def}`);
+    changed = true;
+  }
+  if (changed) persist(false);
 }
 
 function mapGroup(row) {
@@ -131,7 +167,11 @@ export async function openDatabase(userDataDir) {
       sortOrder INTEGER NOT NULL,
       createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL,
-      deletedAt INTEGER
+      deletedAt INTEGER,
+      color TEXT,
+      icon TEXT,
+      highlight INTEGER NOT NULL DEFAULT 0,
+      remindAt INTEGER
     );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -233,14 +273,41 @@ export function defaultGroupId() {
 export function migrateDefaultGroup() {
   const groups = getBoard().groups;
   if (!groups.length) return;
-  const id = resolveDefaultGroupId(groups);
-  const group = groups.find((item) => item.id === id);
-  if (!group) return;
-  setMeta("seed.defaultGroupId", id);
-  if (group.name !== DEFAULT_GROUP_NAME) {
-    run("UPDATE groups SET name = ?, updatedAt = ? WHERE id = ?", [DEFAULT_GROUP_NAME, now(), id]);
-    persist();
+
+  const saved = getMeta("seed.defaultGroupId");
+  if (saved && groups.some((group) => group.id === saved)) {
+    const group = groups.find((item) => item.id === saved);
+    if (
+      group &&
+      LEGACY_DEFAULT_NAMES.includes(group.name) &&
+      group.name !== DEFAULT_GROUP_NAME
+    ) {
+      run("UPDATE groups SET name = ?, updatedAt = ? WHERE id = ?", [
+        DEFAULT_GROUP_NAME,
+        now(),
+        group.id,
+      ]);
+      persist();
+    }
+    return;
   }
+
+  const legacy = groups.find((group) => LEGACY_DEFAULT_NAMES.includes(group.name));
+  if (legacy) {
+    setMeta("seed.defaultGroupId", legacy.id);
+    if (legacy.name !== DEFAULT_GROUP_NAME) {
+      run("UPDATE groups SET name = ?, updatedAt = ? WHERE id = ?", [
+        DEFAULT_GROUP_NAME,
+        now(),
+        legacy.id,
+      ]);
+      persist();
+    }
+    return;
+  }
+
+  // Keine Legacy-Default-Gruppe: erste Gruppe merken, aber nicht umbenennen.
+  setMeta("seed.defaultGroupId", groups[0].id);
 }
 
 export function migrateUngroupedNotes() {
@@ -266,14 +333,39 @@ export function createNote(groupId) {
     sortOrder: (max?.m ?? -1) + 1,
     createdAt: created,
     updatedAt: created,
+    color: null,
+    icon: null,
+    highlight: false,
+    remindAt: null,
   };
   run(
-    `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt)
-     VALUES (?, ?, ?, 0, '', ?, ?, ?)`,
+    `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, color, icon, highlight, remindAt)
+     VALUES (?, ?, ?, 0, '', ?, ?, ?, NULL, NULL, 0, NULL)`,
     [note.id, resolvedGroup, note.title, note.sortOrder, created, created],
   );
   persist();
   return note;
+}
+
+function normalizeOptionalText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function normalizeNoteColor(value) {
+  const text = normalizeOptionalText(value);
+  if (!text) return null;
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(text)) return text.toLowerCase();
+  return null;
+}
+
+function normalizeNoteIcon(value) {
+  const text = normalizeOptionalText(value);
+  if (!text) return null;
+  // Allow a short emoji / ZWJ sequence; reject long free text.
+  if ([...text].length > 8 || text.length > 24) return null;
+  return text;
 }
 
 export function updateNote(patch) {
@@ -294,24 +386,76 @@ export function updateNote(patch) {
   }
   const groupId = patch.groupId !== undefined ? patch.groupId : current.groupId;
   const sortOrder = patch.sortOrder !== undefined ? patch.sortOrder : current.sortOrder;
+  const color =
+    patch.color !== undefined ? normalizeNoteColor(patch.color) : current.color ?? null;
+  const icon =
+    patch.icon !== undefined ? normalizeNoteIcon(patch.icon) : current.icon ?? null;
+  const highlight =
+    patch.highlight !== undefined ? Boolean(patch.highlight) : Boolean(current.highlight);
+  const remindAt =
+    patch.remindAt !== undefined
+      ? patch.remindAt == null
+        ? null
+        : Number(patch.remindAt) || null
+      : current.remindAt ?? null;
   const changed =
     title !== current.title ||
     body !== current.body ||
     groupId !== current.groupId ||
     sortOrder !== current.sortOrder ||
-    Boolean(titleIsManual) !== current.titleIsManual;
+    Boolean(titleIsManual) !== current.titleIsManual ||
+    color !== (current.color ?? null) ||
+    icon !== (current.icon ?? null) ||
+    highlight !== Boolean(current.highlight) ||
+    remindAt !== (current.remindAt ?? null);
   const updatedAt = changed ? now() : current.updatedAt;
   run(
-    `UPDATE notes SET title = ?, titleIsManual = ?, body = ?, groupId = ?, sortOrder = ?, updatedAt = ?
+    `UPDATE notes SET title = ?, titleIsManual = ?, body = ?, groupId = ?, sortOrder = ?,
+      color = ?, icon = ?, highlight = ?, remindAt = ?, updatedAt = ?
      WHERE id = ?`,
-    [title, titleIsManual ? 1 : 0, body, groupId, sortOrder, updatedAt, patch.id],
+    [
+      title,
+      titleIsManual ? 1 : 0,
+      body,
+      groupId,
+      sortOrder,
+      color,
+      icon,
+      highlight ? 1 : 0,
+      remindAt,
+      updatedAt,
+      patch.id,
+    ],
   );
   persist();
   return getNote(patch.id);
 }
 
+export function fireDueReminders(at = Date.now()) {
+  const due = all(
+    `SELECT * FROM notes
+     WHERE deletedAt IS NULL AND remindAt IS NOT NULL AND remindAt <= ?
+     ORDER BY remindAt ASC`,
+    [at],
+  ).map(mapNote);
+  if (!due.length) return [];
+  const ts = now();
+  for (const note of due) {
+    run("UPDATE notes SET highlight = 1, remindAt = NULL, updatedAt = ? WHERE id = ?", [
+      ts,
+      note.id,
+    ]);
+  }
+  persist();
+  return due;
+}
+
 export function deleteNote(id) {
-  run("UPDATE notes SET deletedAt = ?, updatedAt = ? WHERE id = ?", [now(), now(), id]);
+  run("UPDATE notes SET deletedAt = ?, updatedAt = ?, remindAt = NULL WHERE id = ?", [
+    now(),
+    now(),
+    id,
+  ]);
   persist();
 }
 
@@ -333,9 +477,12 @@ export function restoreNote(id) {
     "SELECT COALESCE(MAX(sortOrder), -1) AS m FROM notes WHERE deletedAt IS NULL AND groupId = ?",
     [groupId],
   );
+  const expiredRemind =
+    row.remindAt != null && Number(row.remindAt) <= Date.now() ? null : (row.remindAt ?? null);
   run(
-    "UPDATE notes SET deletedAt = NULL, groupId = ?, sortOrder = ?, updatedAt = ? WHERE id = ?",
-    [groupId, (max?.m ?? -1) + 1, now(), id],
+    `UPDATE notes SET deletedAt = NULL, groupId = ?, sortOrder = ?, remindAt = ?, updatedAt = ?
+     WHERE id = ?`,
+    [groupId, (max?.m ?? -1) + 1, expiredRemind, now(), id],
   );
   persist();
   return getNote(id);
@@ -429,9 +576,19 @@ export function exportSnapshot() {
   return {
     version: 1,
     exportedAt: now(),
-    groups: all("SELECT * FROM groups WHERE deletedAt IS NULL"),
+    groups: all("SELECT * FROM groups"),
     notes: all("SELECT * FROM notes"),
+    meta: {
+      defaultGroupId: getMeta("seed.defaultGroupId") || null,
+      welcomeNoteId: getMeta("seed.welcomeNoteId") || null,
+    },
   };
+}
+
+function applySnapshotMeta(meta) {
+  if (!meta || typeof meta !== "object") return;
+  if (meta.defaultGroupId) setMeta("seed.defaultGroupId", String(meta.defaultGroupId));
+  if (meta.welcomeNoteId) setMeta("seed.welcomeNoteId", String(meta.welcomeNoteId));
 }
 
 export function replaceFromSnapshot(snapshot) {
@@ -455,8 +612,8 @@ export function replaceFromSnapshot(snapshot) {
     }
     for (const note of snapshot.notes ?? []) {
       run(
-        `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, deletedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, deletedAt, color, icon, highlight, remindAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           note.id,
           note.groupId ?? null,
@@ -467,9 +624,14 @@ export function replaceFromSnapshot(snapshot) {
           note.createdAt,
           note.updatedAt,
           note.deletedAt ?? null,
+          normalizeNoteColor(note.color),
+          normalizeNoteIcon(note.icon),
+          note.highlight ? 1 : 0,
+          note.remindAt == null ? null : Number(note.remindAt) || null,
         ],
       );
     }
+    applySnapshotMeta(snapshot.meta);
     persist();
   } finally {
     skipNotify = false;
@@ -480,7 +642,15 @@ export function mergeSnapshot(remote, { prefer = "newer" } = {}) {
   const local = exportSnapshot();
   const groups = mergeById(local.groups, remote.groups ?? [], prefer);
   const notes = mergeById(local.notes, remote.notes ?? [], prefer);
-  replaceFromSnapshot({ groups, notes });
+  replaceFromSnapshot({
+    groups,
+    notes,
+    meta: {
+      defaultGroupId:
+        remote.meta?.defaultGroupId || local.meta?.defaultGroupId || null,
+      welcomeNoteId: remote.meta?.welcomeNoteId || local.meta?.welcomeNoteId || null,
+    },
+  });
 }
 
 export function findNoteConflicts(remoteNotes) {
@@ -492,7 +662,11 @@ export function findNoteConflicts(remoteNotes) {
     const sameContent =
       local.title === (raw.title ?? "") &&
       local.body === (raw.body ?? "") &&
-      (local.groupId ?? null) === (raw.groupId ?? null);
+      (local.groupId ?? null) === (raw.groupId ?? null) &&
+      (local.color ?? null) === (raw.color ?? null) &&
+      (local.icon ?? null) === (raw.icon ?? null) &&
+      Boolean(local.highlight) === Boolean(raw.highlight) &&
+      (local.remindAt ?? null) === (raw.remindAt == null ? null : Number(raw.remindAt) || null);
     if (sameContent) continue;
     conflicts.push({
       id: local.id,
@@ -508,15 +682,19 @@ function mergeById(localItems, remoteItems, prefer = "newer") {
   const map = new Map();
   for (const item of localItems) map.set(item.id, item);
   for (const item of remoteItems) {
-    if (item.deletedAt) continue;
     const current = map.get(item.id);
     if (!current) {
+      // Auch Tombstones übernehmen, damit Soft-Deletes synchron bleiben.
       map.set(item.id, item);
       continue;
     }
-    const remoteAt = item.updatedAt ?? 0;
-    const localAt = current.updatedAt ?? 0;
-    if (remoteAt === localAt) continue;
+    const remoteAt = Number(item.updatedAt) || 0;
+    const localAt = Number(current.updatedAt) || 0;
+    if (remoteAt === localAt) {
+      // Bei Gleichstand gewinnt die Löschung (Tombstone).
+      if (item.deletedAt && !current.deletedAt) map.set(item.id, item);
+      continue;
+    }
     const remoteIsNewer = remoteAt > localAt;
     const takeRemote = prefer === "newer" ? remoteIsNewer : !remoteIsNewer;
     if (takeRemote) map.set(item.id, item);

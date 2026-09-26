@@ -1,5 +1,6 @@
 export const DEFAULT_COLOR_BG = "#14110c";
 export const DEFAULT_COLOR_ACCENT = "#f0c94d";
+export const DEFAULT_COLOR_BLINK = "#e23d3d";
 
 function clampByte(value: number) {
   return Math.min(255, Math.max(0, Math.round(value)));
@@ -79,9 +80,10 @@ export function buildPalette(bgRaw?: string, accentRaw?: string) {
   };
 }
 
-export function applyPalette(bg?: string, accent?: string) {
+export function applyPalette(bg?: string, accent?: string, blink?: string) {
   const root = document.documentElement;
   for (const [name, value] of Object.entries(buildPalette(bg, accent))) {
     root.style.setProperty(name, value);
   }
+  root.style.setProperty("--blink-color", normalizeHex(blink, DEFAULT_COLOR_BLINK));
 }

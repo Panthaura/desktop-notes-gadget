@@ -45,11 +45,13 @@ internal static class Program
         IntPtr hwnd = new IntPtr(hwndVal);
         uint flags = SwpNomove | SwpNosize | SwpNoactivate | SwpFramechanged;
         long ex = GetWindowLongPtr(hwnd, GwlExStyle).ToInt64();
-        ex |= WsExToolwindow;
-        ex &= ~WsExAppwindow;
+        string mode = args.Length > 1 ? args[1] : "tool";
 
-        if (args.Length > 1 && args[1] == "bottom")
+        if (mode == "bottom")
         {
+            // Desktop-Gadget: Toolwindow, unter allen Fenstern.
+            ex |= WsExToolwindow;
+            ex &= ~WsExAppwindow;
             ex &= ~WsExTopmost;
             SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(ex));
             SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, flags);
@@ -57,6 +59,19 @@ internal static class Program
             return 0;
         }
 
+        if (mode == "raise" || mode == "app")
+        {
+            // Raised: in der Taskleiste sichtbar, Z-Order von Electron (alwaysOnTop) belassen.
+            ex &= ~WsExToolwindow;
+            ex |= WsExAppwindow;
+            SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(ex));
+            SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, flags | SwpNozorder);
+            return 0;
+        }
+
+        // tool: Toolwindow ohne Z-Order-Änderung (kein Taskbar-Eintrag).
+        ex |= WsExToolwindow;
+        ex &= ~WsExAppwindow;
         SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(ex));
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, flags | SwpNozorder);
         return 0;
