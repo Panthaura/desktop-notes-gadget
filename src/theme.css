@@ -133,8 +133,9 @@ button {
 }
 
 .search {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: 260px;
   -webkit-app-region: no-drag;
 }
 
@@ -154,10 +155,22 @@ button {
 
 .header-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-wrap: nowrap;
   flex-shrink: 0;
+  margin-left: auto;
   -webkit-app-region: no-drag;
+}
+
+.overlay-date {
+  flex-shrink: 0;
+  color: var(--yellow);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  padding: 0 6px;
 }
 
 .icon-btn,
@@ -556,6 +569,28 @@ button {
   pointer-events: none;
 }
 
+.note-fav-badge {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 3;
+  font-size: 12px;
+  line-height: 1;
+  color: #c9a227;
+  pointer-events: none;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.note-fav-badge.compact-badge {
+  top: 2px;
+  left: 3px;
+  font-size: 9px;
+}
+
+.note-card.favorite:not(.density-initial) {
+  padding-top: 18px;
+}
+
 .note-remind-badge.compact-badge {
   left: auto;
   right: 3px;
@@ -924,6 +959,31 @@ button {
   border-radius: 999px;
   font-size: 13px;
   z-index: 1100;
+}
+
+.toast-undo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 8px 10px 8px 14px;
+}
+
+.toast-action {
+  appearance: none;
+  border: 1px solid var(--yellow);
+  background: var(--yellow);
+  color: #1a1a1a;
+  font: inherit;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.toast-action:hover {
+  background: var(--yellow-hot);
 }
 
 .note-menu {
@@ -1393,6 +1453,12 @@ button {
   border-bottom: 1px solid var(--line);
   -webkit-app-region: drag;
   flex-shrink: 0;
+}
+
+.compact-bar .overlay-date {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
 }
 
 .compact-expand,

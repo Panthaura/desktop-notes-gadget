@@ -639,12 +639,39 @@ async function openEditor(id) {
   setTimeout(releaseBlur, 800);
 }
 
+const HOTKEY_OPTIONS = ["Control+Alt+N", "Control+Shift+N", "Alt+Shift+N"];
+let registeredHotkey = null;
+
+function getHotkeyPreference() {
+  const saved = db.getMeta("ui.hotkey");
+  if (saved && HOTKEY_OPTIONS.includes(saved)) return saved;
+  return HOTKEY_OPTIONS[0];
+}
+
 function registerHotkey() {
-  const combos = ["Control+Alt+N", "Control+Shift+N"];
+  globalShortcut.unregisterAll();
+  const preferred = getHotkeyPreference();
+  const combos = [preferred, ...HOTKEY_OPTIONS.filter((combo) => combo !== preferred)];
   for (const combo of combos) {
-    if (globalShortcut.register(combo, toggleOverlay)) return combo;
+    try {
+      if (globalShortcut.register(combo, toggleOverlay)) {
+        registeredHotkey = combo;
+        return combo;
+      }
+    } catch {
+      // Combo already taken by another app.
+    }
   }
+  registeredHotkey = null;
   return null;
+}
+
+function formatHotkeyLabel(combo) {
+  if (!combo) return "—";
+  return combo
+    .replace(/Control/g, "Ctrl")
+    .replace(/CommandOrControl/g, "Ctrl")
+    .replace(/\+/g, "+");
 }
 
 function getAppVersion() {
@@ -665,6 +692,9 @@ function getSettings() {
     compactLocked: db.getMeta("ui.compactLocked") === "1",
     locale: i18n.getLocale(),
     appVersion: getAppVersion(),
+    hotkey: registeredHotkey,
+    hotkeyPreferred: getHotkeyPreference(),
+    hotkeyOptions: HOTKEY_OPTIONS,
     ...getColors(),
     ...jsonStore.getState(),
   };
@@ -1114,6 +1144,12 @@ function refreshTrayMenu() {
           await openEditor(note.id);
         },
       },
+      {
+        label: i18n.t("trayHotkey", "Hotkey: {hotkey}", {
+          hotkey: formatHotkeyLabel(registeredHotkey),
+        }),
+        enabled: false,
+      },
       { type: "separator" },
       {
         label: i18n.t("trayVersion", "Version {version}", { version }),
@@ -1174,6 +1210,9 @@ function registerIpc() {
     const editor = editorWindows.get(id);
     if (editor && !editor.isDestroyed()) editor.close();
     broadcastBoard();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send("notes:deleted", { id });
+    }
   });
   ipcMain.handle("notes:archived", () => db.listArchivedNotes());
   ipcMain.handle("notes:restore", (_e, id) => {
@@ -1280,6 +1319,17 @@ function registerIpc() {
   });
   ipcMain.handle("settings:setAlwaysOnTop", (_e, enabled) => {
     setAlwaysOnTopEnabled(Boolean(enabled));
+    return getSettings();
+  });
+  ipcMain.handle("settings:setHotkey", (_e, combo) => {
+    const next = String(combo || "");
+    if (!HOTKEY_OPTIONS.includes(next)) return getSettings();
+    db.setMeta("ui.hotkey", next);
+    const registered = registerHotkey();
+    refreshTrayMenu();
+    if (!registered) {
+      console.warn("Hotkey konnte nicht registriert werden. Overlay über das Tray einblenden.");
+    }
     return getSettings();
   });
   ipcMain.handle("settings:setPreviewSplit", (_e, value) => {

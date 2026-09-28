@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld("notesApi", {
   setOpenAtLogin: (enabled) => ipcRenderer.invoke("settings:setOpenAtLogin", enabled),
   setOpacity: (value) => ipcRenderer.invoke("settings:setOpacity", value),
   setAlwaysOnTop: (enabled) => ipcRenderer.invoke("settings:setAlwaysOnTop", enabled),
+  setHotkey: (combo) => ipcRenderer.invoke("settings:setHotkey", combo),
   setPreviewSplit: (value) => ipcRenderer.invoke("settings:setPreviewSplit", value),
   chooseJsonPath: () => ipcRenderer.invoke("settings:chooseJsonPath"),
   listBackups: () => ipcRenderer.invoke("backups:list"),
@@ -62,6 +63,11 @@ contextBridge.exposeInMainWorld("notesApi", {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on("reminders:fired", handler);
     return () => ipcRenderer.removeListener("reminders:fired", handler);
+  },
+  onNoteDeleted: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("notes:deleted", handler);
+    return () => ipcRenderer.removeListener("notes:deleted", handler);
   },
   onLocaleChanged: (cb) => {
     const handler = (_e, locale) => cb(locale);

@@ -107,6 +107,7 @@ function mapNote(row) {
     icon: row.icon ?? null,
     highlight: Boolean(row.highlight),
     remindAt: row.remindAt == null ? null : Number(row.remindAt),
+    favorite: Boolean(row.favorite),
   };
 }
 
@@ -120,6 +121,7 @@ export function migrateNoteExtras() {
     ["icon", "TEXT"],
     ["highlight", "INTEGER NOT NULL DEFAULT 0"],
     ["remindAt", "INTEGER"],
+    ["favorite", "INTEGER NOT NULL DEFAULT 0"],
   ];
   let changed = false;
   for (const [name, def] of columns) {
@@ -171,7 +173,8 @@ export async function openDatabase(userDataDir) {
       color TEXT,
       icon TEXT,
       highlight INTEGER NOT NULL DEFAULT 0,
-      remindAt INTEGER
+      remindAt INTEGER,
+      favorite INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -246,7 +249,7 @@ export function getBoard() {
     "SELECT * FROM groups WHERE deletedAt IS NULL ORDER BY sortOrder ASC, createdAt ASC",
   ).map(mapGroup);
   const notes = all(
-    "SELECT * FROM notes WHERE deletedAt IS NULL ORDER BY sortOrder ASC, createdAt ASC",
+    "SELECT * FROM notes WHERE deletedAt IS NULL ORDER BY favorite DESC, sortOrder ASC, createdAt ASC",
   ).map(mapNote);
   return { groups, notes, defaultGroupId: groups[0] ? resolveDefaultGroupId(groups) : null };
 }
@@ -337,10 +340,11 @@ export function createNote(groupId) {
     icon: null,
     highlight: false,
     remindAt: null,
+    favorite: false,
   };
   run(
-    `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, color, icon, highlight, remindAt)
-     VALUES (?, ?, ?, 0, '', ?, ?, ?, NULL, NULL, 0, NULL)`,
+    `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, color, icon, highlight, remindAt, favorite)
+     VALUES (?, ?, ?, 0, '', ?, ?, ?, NULL, NULL, 0, NULL, 0)`,
     [note.id, resolvedGroup, note.title, note.sortOrder, created, created],
   );
   persist();
@@ -398,6 +402,8 @@ export function updateNote(patch) {
         ? null
         : Number(patch.remindAt) || null
       : current.remindAt ?? null;
+  const favorite =
+    patch.favorite !== undefined ? Boolean(patch.favorite) : Boolean(current.favorite);
   const changed =
     title !== current.title ||
     body !== current.body ||
@@ -407,11 +413,12 @@ export function updateNote(patch) {
     color !== (current.color ?? null) ||
     icon !== (current.icon ?? null) ||
     highlight !== Boolean(current.highlight) ||
-    remindAt !== (current.remindAt ?? null);
+    remindAt !== (current.remindAt ?? null) ||
+    favorite !== Boolean(current.favorite);
   const updatedAt = changed ? now() : current.updatedAt;
   run(
     `UPDATE notes SET title = ?, titleIsManual = ?, body = ?, groupId = ?, sortOrder = ?,
-      color = ?, icon = ?, highlight = ?, remindAt = ?, updatedAt = ?
+      color = ?, icon = ?, highlight = ?, remindAt = ?, favorite = ?, updatedAt = ?
      WHERE id = ?`,
     [
       title,
@@ -423,6 +430,7 @@ export function updateNote(patch) {
       icon,
       highlight ? 1 : 0,
       remindAt,
+      favorite ? 1 : 0,
       updatedAt,
       patch.id,
     ],
@@ -555,7 +563,7 @@ export function moveNote(id, groupId, index) {
   const targetGroup = groupId || defaultGroupId();
   run("UPDATE notes SET groupId = ? WHERE id = ?", [targetGroup, id]);
   const siblings = all(
-    "SELECT id FROM notes WHERE deletedAt IS NULL AND groupId = ? AND id != ? ORDER BY sortOrder ASC",
+    "SELECT id FROM notes WHERE deletedAt IS NULL AND groupId = ? AND id != ? ORDER BY favorite DESC, sortOrder ASC",
     [targetGroup, id],
   );
   const ids = siblings.map((row) => row.id);
@@ -612,8 +620,8 @@ export function replaceFromSnapshot(snapshot) {
     }
     for (const note of snapshot.notes ?? []) {
       run(
-        `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, deletedAt, color, icon, highlight, remindAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notes (id, groupId, title, titleIsManual, body, sortOrder, createdAt, updatedAt, deletedAt, color, icon, highlight, remindAt, favorite)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           note.id,
           note.groupId ?? null,
@@ -628,6 +636,7 @@ export function replaceFromSnapshot(snapshot) {
           normalizeNoteIcon(note.icon),
           note.highlight ? 1 : 0,
           note.remindAt == null ? null : Number(note.remindAt) || null,
+          note.favorite ? 1 : 0,
         ],
       );
     }
@@ -666,7 +675,8 @@ export function findNoteConflicts(remoteNotes) {
       (local.color ?? null) === (raw.color ?? null) &&
       (local.icon ?? null) === (raw.icon ?? null) &&
       Boolean(local.highlight) === Boolean(raw.highlight) &&
-      (local.remindAt ?? null) === (raw.remindAt == null ? null : Number(raw.remindAt) || null);
+      (local.remindAt ?? null) === (raw.remindAt == null ? null : Number(raw.remindAt) || null) &&
+      Boolean(local.favorite) === Boolean(raw.favorite);
     if (sameContent) continue;
     conflicts.push({
       id: local.id,

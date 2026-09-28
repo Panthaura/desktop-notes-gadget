@@ -16,6 +16,7 @@ export type NotesApi = {
     icon?: string | null;
     highlight?: boolean;
     remindAt?: number | null;
+    favorite?: boolean;
   }): Promise<Note | null>;
   deleteNote(id: string): Promise<void>;
   listArchivedNotes(): Promise<Note[]>;
@@ -80,6 +81,7 @@ export type NotesApi = {
   setOpenAtLogin(enabled: boolean): Promise<Settings>;
   setOpacity(value: number): Promise<Settings>;
   setAlwaysOnTop(enabled: boolean): Promise<Settings>;
+  setHotkey(combo: string): Promise<Settings>;
   setPreviewSplit(value: number): Promise<Settings>;
   setLocale(locale: "de" | "en"): Promise<Settings>;
   setColors(patch: {
@@ -98,6 +100,7 @@ export type NotesApi = {
   confirm(payload: { title?: string; message: string; ok?: string }): Promise<boolean>;
   onBoardChanged(cb: () => void): () => void;
   onRemindersFired(cb: (payload: { count: number; title: string }) => void): () => void;
+  onNoteDeleted(cb: (payload: { id: string }) => void): () => void;
   onLocaleChanged(cb: (locale: "de" | "en") => void): () => void;
   onThemeChanged(
     cb: (payload: { colorBg: string; colorAccent: string; colorBlink: string }) => void,

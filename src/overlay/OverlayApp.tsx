@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { BackupInfo, Board, Group, Note, Settings } from "../types";
 import { useConfirm } from "../ConfirmDialog";
-import { dateLocale, setLocale, useT } from "../i18n";
+import { dateLocale, formatHeaderDate, setLocale, useT } from "../i18n";
 import { applyPalette, DEFAULT_COLOR_ACCENT, DEFAULT_COLOR_BG, DEFAULT_COLOR_BLINK } from "../themeColors";
 import { formatRemindShort } from "../ctxmenu/menuShared";
 
@@ -32,6 +32,7 @@ export default function OverlayApp() {
   const [archived, setArchived] = useState<Note[]>([]);
   const [archiveId, setArchiveId] = useState("");
   const [toast, setToast] = useState<string | null>(null);
+  const [undoId, setUndoId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [draggingGroup, setDraggingGroup] = useState<string | null>(null);
   const [dropGroup, setDropGroup] = useState<string | null>(null);
@@ -66,11 +67,17 @@ export default function OverlayApp() {
     });
     const offReminders = window.notesApi.onRemindersFired((payload) => {
       const title = payload.title?.trim() || t("emptyNote", "Leere Notiz");
+      setUndoId(null);
       setToast(
         payload.count === 1
           ? t("remindFired", "Erinnerung: {title}", { title })
           : t("remindFiredMany", "{n} Erinnerungen fällig", { n: payload.count }),
       );
+    });
+    const offDeleted = window.notesApi.onNoteDeleted((payload) => {
+      if (!payload?.id) return;
+      setToast(null);
+      setUndoId(payload.id);
     });
     const offLocale = window.notesApi.onLocaleChanged((locale) => {
       setLocale(locale);
@@ -85,6 +92,7 @@ export default function OverlayApp() {
     return () => {
       offBoard();
       offReminders();
+      offDeleted();
       offLocale();
       offSettings();
     };
@@ -96,6 +104,12 @@ export default function OverlayApp() {
     const id = window.setTimeout(() => setToast(null), longer ? 6500 : 3200);
     return () => window.clearTimeout(id);
   }, [toast]);
+
+  useEffect(() => {
+    if (!undoId) return;
+    const id = window.setTimeout(() => setUndoId(null), 7000);
+    return () => window.clearTimeout(id);
+  }, [undoId]);
 
   useEffect(() => {
     if (selectedId && !board.notes.some((note) => note.id === selectedId)) {
@@ -266,7 +280,26 @@ export default function OverlayApp() {
   function notesIn(groupId: string) {
     return filteredNotes
       .filter((note) => note.groupId === groupId)
-      .sort((a, b) => a.sortOrder - b.sortOrder);
+      .sort((a, b) => {
+        const fav = Number(Boolean(b.favorite)) - Number(Boolean(a.favorite));
+        if (fav !== 0) return fav;
+        return a.sortOrder - b.sortOrder;
+      });
+  }
+
+  async function undoDelete() {
+    if (!undoId) return;
+    const id = undoId;
+    setUndoId(null);
+    const restored = await window.notesApi.restoreNote(id);
+    if (!restored) {
+      setToast(t("archiveRestoreFailed", "Notiz konnte nicht wiederhergestellt werden"));
+      return;
+    }
+    await refresh();
+    if (settingsOpen) await loadArchived();
+    setSelectedId(restored.id);
+    setToast(t("undoRestored", "Notiz wiederhergestellt"));
   }
 
   async function onDrop(groupId: string, index: number) {
@@ -463,6 +496,7 @@ export default function OverlayApp() {
             <ExpandIcon />
             <span>{t("expandChrome", "Erweitern")}</span>
           </button>
+          <HeaderDate />
           <button
             type="button"
             className="ghost-btn compact-add"
@@ -490,6 +524,7 @@ export default function OverlayApp() {
           />
         </div>
         <div className="header-actions">
+          <HeaderDate />
           <button
             className="ghost-btn"
             onClick={async () => {
@@ -587,6 +622,41 @@ export default function OverlayApp() {
             />
             {t("alwaysOnTop", "Immer im Vordergrund")}
           </label>
+          <div className="settings-block">
+            <span className="settings-label">{t("hotkey", "Hotkey")}</span>
+            <select
+              value={settings.hotkeyPreferred || settings.hotkey || "Control+Alt+N"}
+              onChange={async (e) => {
+                const next = await window.notesApi.setHotkey(e.target.value);
+                setSettings((current) => ({ ...current, ...next }));
+                setToast(
+                  next.hotkey
+                    ? t("hotkeySet", "Hotkey: {hotkey}", {
+                        hotkey: formatHotkeyDisplay(next.hotkey),
+                      })
+                    : t("hotkeyFailed", "Hotkey nicht verfügbar"),
+                );
+              }}
+            >
+              {(settings.hotkeyOptions?.length
+                ? settings.hotkeyOptions
+                : ["Control+Alt+N", "Control+Shift+N", "Alt+Shift+N"]
+              ).map((combo) => (
+                <option key={combo} value={combo}>
+                  {formatHotkeyDisplay(combo)}
+                </option>
+              ))}
+            </select>
+            {settings.hotkey &&
+            settings.hotkeyPreferred &&
+            settings.hotkey !== settings.hotkeyPreferred ? (
+              <p className="path-line">
+                {t("hotkeyFallback", "Aktiv (Fallback): {hotkey}", {
+                  hotkey: formatHotkeyDisplay(settings.hotkey),
+                })}
+              </p>
+            ) : null}
+          </div>
           <div className="settings-block">
             <span className="settings-label">{t("colors", "Farben")}</span>
             <label className="settings-inline">
@@ -923,7 +993,16 @@ export default function OverlayApp() {
       ) : null}
       </div>
       {confirmDialog}
-      {toast ? <div className="toast">{toast}</div> : null}
+      {undoId ? (
+        <div className="toast toast-undo">
+          <span>{t("noteDeletedUndo", "Notiz gelöscht")}</span>
+          <button type="button" className="toast-action" onClick={() => void undoDelete()}>
+            {t("undo", "Rückgängig")}
+          </button>
+        </div>
+      ) : toast ? (
+        <div className="toast">{toast}</div>
+      ) : null}
       <div className="resize-grip" title={t("resize", "Größe ändern")} />
     </div>
   );
@@ -1146,12 +1225,13 @@ function NoteCard(props: {
   const color = props.note.color?.trim() || "";
   const highlight = Boolean(props.note.highlight);
   const remindAt = props.note.remindAt ?? null;
+  const favorite = Boolean(props.note.favorite);
 
   return (
     <article
       className={`note-card density-${density}${props.draggingId === props.note.id ? " dragging" : ""}${
         props.selectedId === props.note.id ? " selected" : ""
-      }${highlight ? " highlight" : ""}${color ? " has-color" : ""}`}
+      }${highlight ? " highlight" : ""}${favorite ? " favorite" : ""}${color ? " has-color" : ""}`}
       style={{
         zIndex: props.index + 1,
         ...(color ? { ["--note-color" as string]: color } : {}),
@@ -1198,6 +1278,15 @@ function NoteCard(props: {
           ×
         </button>
       ) : null}
+      {favorite ? (
+        <span
+          className={`note-fav-badge${density === "initial" ? " compact-badge" : ""}`}
+          title={t("favorite", "Favorit")}
+          aria-label={t("favorite", "Favorit")}
+        >
+          ★
+        </span>
+      ) : null}
       {remindAt ? (
         <span
           className={`note-remind-badge${density === "initial" ? " compact-badge" : ""}`}
@@ -1217,6 +1306,33 @@ function NoteCard(props: {
         </div>
       )}
     </article>
+  );
+}
+
+function HeaderDate() {
+  useT();
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    function msUntilNextMidnight() {
+      const now = new Date();
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      return Math.max(1000, next.getTime() - now.getTime() + 50);
+    }
+    let timeoutId = window.setTimeout(function onMidnight() {
+      setTick((n) => n + 1);
+      timeoutId = window.setTimeout(onMidnight, msUntilNextMidnight());
+    }, msUntilNextMidnight());
+    return () => window.clearTimeout(timeoutId);
+  }, []);
+
+  const label = formatHeaderDate();
+  void tick;
+
+  return (
+    <time className="overlay-date" dateTime={new Date().toISOString().slice(0, 10)}>
+      {label}
+    </time>
   );
 }
 
@@ -1313,6 +1429,13 @@ function noteInitial(title: string) {
   if (!trimmed) return "?";
   const ch = [...trimmed][0] || "?";
   return ch.toLocaleUpperCase();
+}
+
+function formatHotkeyDisplay(combo: string) {
+  return combo
+    .replace(/Control/g, "Ctrl")
+    .replace(/CommandOrControl/g, "Ctrl")
+    .replace(/\+/g, "+");
 }
 
 function pickNoteDensity(noteCount: number, width: number, height: number): NoteDensity {

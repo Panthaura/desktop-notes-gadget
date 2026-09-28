@@ -87,6 +87,7 @@ export default function CtxMenuApp() {
       icon: string | null;
       highlight: boolean;
       remindAt: number | null;
+      favorite: boolean;
     }>,
   ) {
     const noteId = present?.note?.id;
@@ -186,6 +187,14 @@ export default function CtxMenuApp() {
             <button type="button" onClick={() => setPanel("icon")}>
               {t("noteIcon", "Icon…")}
               {note.icon ? ` ${note.icon}` : ""}
+            </button>
+            <button
+              type="button"
+              onClick={() => void patchNote({ favorite: !Boolean(note.favorite) })}
+            >
+              {note.favorite
+                ? t("favoriteOff", "Favorit entfernen")
+                : t("favoriteOn", "Als Favorit")}
             </button>
             <button
               type="button"

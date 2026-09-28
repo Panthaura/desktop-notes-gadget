@@ -20,6 +20,7 @@ export type Note = {
   icon: string | null;
   highlight: boolean;
   remindAt: number | null;
+  favorite: boolean;
 };
 
 export type Board = {
@@ -43,6 +44,9 @@ export type Settings = {
   colorBlink?: string;
   backupIntervalDays?: number;
   backupKeepCount?: number;
+  hotkey?: string | null;
+  hotkeyPreferred?: string;
+  hotkeyOptions?: string[];
   cancelled?: boolean;
   imported?: boolean;
   conflicts?: number;
