@@ -49,13 +49,20 @@ let ignoreBlur = false;
 let pinGeneration = 0;
 /** After raiseOverlay: don't auto-dock until this timestamp (ms). Prevents "invisible app" on start. */
 let raiseHoldUntil = 0;
+/** Extra grace after cold start / second-instance — Virtual Desktop & Explorer steal focus often. */
+let startupGraceUntil = 0;
+let visibilityWatchTimer = null;
 
 function beginRaiseHold(ms = 2800) {
   raiseHoldUntil = Date.now() + ms;
 }
 
 function isRaiseHoldActive() {
-  return Date.now() < raiseHoldUntil;
+  return Date.now() < raiseHoldUntil || Date.now() < startupGraceUntil;
+}
+
+function beginStartupGrace(ms = 12_000) {
+  startupGraceUntil = Date.now() + ms;
 }
 
 function isAlwaysOnTop() {
@@ -216,17 +223,55 @@ function clearAlwaysOnTop() {
   }
 }
 
+function ensureOverlayOnScreen() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  try {
+    const current = overlayWindow.getBounds();
+    const next = clampBounds(current);
+    const tooHuge =
+      next.width > screen.getPrimaryDisplay().workArea.width * 0.85 ||
+      next.height > screen.getPrimaryDisplay().workArea.height * 0.85;
+    if (
+      tooHuge ||
+      next.x !== current.x ||
+      next.y !== current.y ||
+      next.width !== current.width ||
+      next.height !== current.height
+    ) {
+      overlayWindow.setBounds(tooHuge ? defaultOverlayBounds() : next);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function raiseOverlay({ focusOverlay = true, holdMs = 2800 } = {}) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   pinGeneration += 1;
   overlayRaised = true;
   beginRaiseHold(holdMs);
   stopDockLoop();
+  ensureOverlayOnScreen();
   // While raised, show a taskbar entry so the app is discoverable (docked mode hides it again).
-  overlayWindow.setSkipTaskbar(false);
+  try {
+    overlayWindow.setSkipTaskbar(false);
+  } catch {
+    // ignore
+  }
   overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  // showInactive first helps when Explorer/Virtual Desktop stole focus during autostart.
+  try {
+    overlayWindow.showInactive();
+  } catch {
+    // ignore
+  }
   overlayWindow.show();
   if (focusOverlay) {
+    try {
+      if (overlayWindow.isMinimized()) overlayWindow.restore();
+    } catch {
+      // ignore
+    }
     overlayWindow.focus();
     overlayWindow.moveTop();
   }
@@ -246,7 +291,51 @@ function raiseOverlay({ focusOverlay = true, holdMs = 2800 } = {}) {
   if (!isAlwaysOnTop()) startFocusWatch();
   else stopFocusWatch();
   // "raise" clears TOOLWINDOW / sets APPWINDOW so setSkipTaskbar(false) can stick.
-  void pinAsDesktopGadget(overlayWindow, "raise").catch(() => undefined);
+  void pinAsDesktopGadget(overlayWindow, "raise")
+    .catch(() => undefined)
+    .finally(() => {
+      if (!overlayWindow || overlayWindow.isDestroyed() || !overlayRaised) return;
+      try {
+        if (!overlayWindow.isVisible()) overlayWindow.show();
+        overlayWindow.setAlwaysOnTop(true, "screen-saver");
+        if (focusOverlay) {
+          overlayWindow.focus();
+          overlayWindow.moveTop();
+        }
+      } catch {
+        // ignore
+      }
+    });
+}
+
+function stopVisibilityWatch() {
+  if (!visibilityWatchTimer) return;
+  clearInterval(visibilityWatchTimer);
+  visibilityWatchTimer = null;
+}
+
+/** Recover from "process alive, window hidden" (common after Autostart / Virtual Desktop). */
+function startVisibilityWatch(ms = 15_000) {
+  stopVisibilityWatch();
+  const until = Date.now() + ms;
+  let kicks = 0;
+  visibilityWatchTimer = setInterval(() => {
+    if (Date.now() > until || kicks >= 6 || app.isQuitting) {
+      stopVisibilityWatch();
+      return;
+    }
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    let visible = false;
+    try {
+      visible = overlayWindow.isVisible();
+    } catch {
+      visible = false;
+    }
+    if (visible && overlayRaised) return;
+    kicks += 1;
+    console.warn("Overlay nicht sichtbar — erneuter Raise", { kicks, visible, overlayRaised });
+    raiseOverlay({ holdMs: 8000 });
+  }, 2500);
 }
 
 function rendererUrl(query) {
@@ -324,8 +413,8 @@ function broadcastBoard() {
 
 function defaultOverlayBounds() {
   const { workArea } = screen.getPrimaryDisplay();
-  const width = Math.min(1080, Math.max(560, workArea.width - 40));
-  const height = Math.min(640, Math.max(400, workArea.height - 80));
+  const width = Math.min(1080, Math.max(560, Math.min(workArea.width - 40, 1200)));
+  const height = Math.min(640, Math.max(400, Math.min(workArea.height - 80, 900)));
   return {
     x: workArea.x + workArea.width - width - 24,
     y: workArea.y + 24,
@@ -337,10 +426,13 @@ function defaultOverlayBounds() {
 function clampBounds(bounds) {
   const minW = 220;
   const minH = 200;
+  const { workArea } = screen.getPrimaryDisplay();
+  const maxW = Math.max(minW, Math.floor(workArea.width * 0.75));
+  const maxH = Math.max(minH, Math.floor(workArea.height * 0.75));
   const next = {
     ...bounds,
-    width: Math.max(minW, bounds.width || minW),
-    height: Math.max(minH, bounds.height || minH),
+    width: Math.min(maxW, Math.max(minW, bounds.width || minW)),
+    height: Math.min(maxH, Math.max(minH, bounds.height || minH)),
   };
   const displays = screen.getAllDisplays();
   const visible = displays.some((display) => {
@@ -355,6 +447,8 @@ function clampBounds(bounds) {
 
 async function dockOverlay({ force = false } = {}) {
   if (!overlayWindow || overlayWindow.isDestroyed() || docking) return;
+  // Never auto-dock during cold-start grace — otherwise Autostart leaves a hidden process.
+  if (!force && isRaiseHoldActive()) return;
   restoreOverlayMenuSpace();
   if (!force && isAlwaysOnTop()) {
     raiseOverlay();
@@ -485,15 +579,34 @@ async function createOverlay() {
   });
   overlayWindow.on("ready-to-show", () => {
     applyOpacity();
-    // Longer hold on cold start so Autostart / Explorer focus doesn't pin it behind immediately.
-    raiseOverlay({ holdMs: 4500 });
+    beginStartupGrace(12_000);
+    // Longer hold on cold start so Autostart / Explorer / Virtual Desktop don't bury it.
+    raiseOverlay({ holdMs: 10_000 });
+    startVisibilityWatch(18_000);
   });
+  // Fallback if ready-to-show never fires (stuck hidden process).
+  setTimeout(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    try {
+      if (overlayWindow.isVisible()) return;
+    } catch {
+      // continue
+    }
+    console.warn("ready-to-show Timeout — erzwinge Raise");
+    beginStartupGrace(12_000);
+    raiseOverlay({ holdMs: 10_000 });
+    startVisibilityWatch(18_000);
+  }, 2500);
   overlayWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
     console.error("Preload-Fehler", preloadPath, error);
   });
   overlayWindow.webContents.on("did-finish-load", async () => {
     const hasApi = await overlayWindow.webContents.executeJavaScript("Boolean(window.notesApi)");
     console.log("notesApi geladen:", hasApi);
+    if (!overlayWindow.isVisible()) {
+      beginStartupGrace(12_000);
+      raiseOverlay({ holdMs: 10_000 });
+    }
   });
   loadRenderer(overlayWindow, { window: "overlay" });
 }
@@ -1061,6 +1174,7 @@ function quitApp() {
   stopReminderWatch();
   stopDockLoop();
   stopFocusWatch();
+  stopVisibilityWatch();
   try {
     overlayWindow?.setClosable(true);
   } catch {
@@ -1381,7 +1495,17 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    raiseOverlay({ holdMs: 4000 });
+    beginStartupGrace(10_000);
+    raiseOverlay({ holdMs: 8000 });
+    startVisibilityWatch(12_000);
+    try {
+      tray?.displayBalloon?.({
+        title: "Desktop Notes",
+        content: i18n.t("trayShow", "Overlay einblenden"),
+      });
+    } catch {
+      // ignore
+    }
   });
   app.whenReady().then(async () => {
     app.setAppUserModelId("desktop.notes.gadget");
