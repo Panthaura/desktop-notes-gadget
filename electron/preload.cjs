@@ -27,7 +27,8 @@ contextBridge.exposeInMainWorld("notesApi", {
       minHeight: size?.minHeight,
       forceHeight: Boolean(size?.forceHeight),
     }),
-  clearCompact: () => ipcRenderer.invoke("overlay:clearCompact"),
+  clearCompact: (restoreBounds) =>
+    ipcRenderer.invoke("overlay:clearCompact", { restoreBounds: Boolean(restoreBounds) }),
   expandChrome: () => ipcRenderer.invoke("overlay:expandChrome"),
   fitMenuSpace: (payload) => ipcRenderer.invoke("overlay:fitMenuSpace", payload),
   restoreMenuSpace: () => ipcRenderer.invoke("overlay:restoreMenuSpace"),

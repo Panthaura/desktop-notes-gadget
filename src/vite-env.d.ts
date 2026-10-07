@@ -36,7 +36,7 @@ export type NotesApi = {
     locked?: boolean,
     size?: { width: number; height: number; minHeight?: number; forceHeight?: boolean },
   ): Promise<Settings>;
-  clearCompact(): Promise<Settings>;
+  clearCompact(restoreBounds?: boolean): Promise<Settings>;
   expandChrome(): Promise<Settings>;
   fitMenuSpace(payload: {
     menuLeft: number;

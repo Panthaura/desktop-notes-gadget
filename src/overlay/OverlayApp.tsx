@@ -129,51 +129,61 @@ export default function OverlayApp() {
   compactLockedRef.current = Boolean(settings.compactLocked);
 
   useEffect(() => {
-    let expanding = false;
-    let liveRaf = 0;
+    let busy = false;
+
+    // Hysteresis: enter compact when clearly small; leave only when clearly large.
+    // Locked compact (user clicked minimize) never auto-expands.
+    const ENTER_W = 400;
+    const ENTER_H = 300;
+    const EXIT_W = 560;
+    const EXIT_H = 420;
 
     function applyAutoCompactState() {
+      if (busy) return;
       const w = window.innerWidth;
       const h = window.innerHeight;
-      if (w < 400 || h < 300) {
-        if (!compactRef.current) setCompact(true);
-        return;
-      }
-      if (compactRef.current && w >= 520 && h >= 400) {
-        if (expanding) return;
-        expanding = true;
-        compactLockedRef.current = false;
-        setCompact(false);
+      const locked = compactLockedRef.current;
+
+      if (!compactRef.current && (w < ENTER_W || h < ENTER_H)) {
+        busy = true;
+        setCompact(true);
+        const size = {
+          ...measureCompactSize(noteCountRef.current),
+          forceHeight: false,
+        };
         void window.notesApi
-          .clearCompact()
+          .setCompact(true, false, size)
           .then((next) => {
             setSettings((current) => ({ ...current, ...next }));
           })
           .finally(() => {
-            expanding = false;
+            busy = false;
+          });
+        return;
+      }
+
+      if (compactRef.current && !locked && w >= EXIT_W && h >= EXIT_H) {
+        busy = true;
+        setCompact(false);
+        void window.notesApi
+          .clearCompact(true)
+          .then((next) => {
+            setSettings((current) => ({ ...current, ...next }));
+          })
+          .finally(() => {
+            busy = false;
           });
       }
     }
 
-    function onLiveResize() {
-      if (liveRaf) return;
-      liveRaf = window.requestAnimationFrame(() => {
-        liveRaf = 0;
-        // Live UI only — main process skips setBounds while the user is dragging.
-        applyAutoCompactState();
-      });
-    }
-
+    // Mode flips only after resize ends — mid-drag flips were unstable.
     const offResized = window.notesApi.onOverlayResized(() => {
       applyAutoCompactState();
     });
 
     applyAutoCompactState();
-    window.addEventListener("resize", onLiveResize);
     return () => {
       offResized();
-      window.removeEventListener("resize", onLiveResize);
-      if (liveRaf) window.cancelAnimationFrame(liveRaf);
     };
   }, []);
 
@@ -207,7 +217,7 @@ export default function OverlayApp() {
         const cards = boardRef.current?.querySelector(".cards") as HTMLElement | null;
         if (!cards) return;
         const rect = cards.getBoundingClientRect();
-        setNoteDensity(pickNoteDensity(count, rect.width, rect.height));
+        setNoteDensity((current) => pickNoteDensity(count, rect.width, rect.height, current));
       });
     };
     const frame = window.requestAnimationFrame(() => {
@@ -230,8 +240,9 @@ export default function OverlayApp() {
       const entry = entries[0];
       if (!entry) return;
       const { width, height } = entry.contentRect;
-      const density = pickNoteDensity(noteCountRef.current, width, height);
-      setNoteDensity(density);
+      setNoteDensity((current) =>
+        pickNoteDensity(noteCountRef.current, width, height, current),
+      );
     });
     ro.observe(cards);
     return () => ro.disconnect();
@@ -1438,23 +1449,38 @@ function formatHotkeyDisplay(combo: string) {
     .replace(/\+/g, "+");
 }
 
-function pickNoteDensity(noteCount: number, width: number, height: number): NoteDensity {
+function pickNoteDensity(
+  noteCount: number,
+  width: number,
+  height: number,
+  current: NoteDensity = "full",
+): NoteDensity {
   const n = Math.max(0, noteCount);
   if (n <= COMPACT_FIT_NOTES) return "full";
   if (width < 8 || height < 8) return "full";
 
   const fullNeed = noteStackHeight(n);
-  if (fullNeed <= height) return "full";
-
   const smallNeed = n * SMALL_CARD_H + Math.max(0, n - 1) * SMALL_GAP;
-  if (smallNeed <= height) return "small";
-
   const cols = Math.max(1, Math.floor((width + SMALL_GAP) / (INITIAL_TILE + SMALL_GAP)));
   const rows = Math.ceil(n / cols);
   const gridNeed = rows * INITIAL_TILE + Math.max(0, rows - 1) * SMALL_GAP;
-  if (gridNeed <= height + 8) return "initial";
+  // Hysteresis so tiny resize jitter does not flip full↔small↔initial.
+  const slack = 20;
 
-  // Still cramped: stay on letter tiles so the grid can scroll.
+  if (current === "full") {
+    if (fullNeed <= height + slack) return "full";
+    if (smallNeed <= height + slack) return "small";
+    return "initial";
+  }
+  if (current === "small") {
+    if (fullNeed <= height - slack) return "full";
+    if (smallNeed <= height + slack) return "small";
+    return "initial";
+  }
+  // current === "initial"
+  if (fullNeed <= height - slack) return "full";
+  if (smallNeed <= height - slack) return "small";
+  if (gridNeed <= height + slack + 8) return "initial";
   return "initial";
 }
 

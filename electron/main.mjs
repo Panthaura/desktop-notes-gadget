@@ -52,6 +52,8 @@ let raiseHoldUntil = 0;
 /** Extra grace after cold start / second-instance — Virtual Desktop & Explorer steal focus often. */
 let startupGraceUntil = 0;
 let visibilityWatchTimer = null;
+let dockAfterRaiseTimer = null;
+let dockAfterRaiseDeadline = 0;
 
 function beginRaiseHold(ms = 2800) {
   raiseHoldUntil = Date.now() + ms;
@@ -61,8 +63,39 @@ function isRaiseHoldActive() {
   return Date.now() < raiseHoldUntil || Date.now() < startupGraceUntil;
 }
 
-function beginStartupGrace(ms = 12_000) {
+function beginStartupGrace(ms = 4_000) {
   startupGraceUntil = Date.now() + ms;
+}
+
+function cancelScheduledDock() {
+  if (dockAfterRaiseTimer) {
+    clearTimeout(dockAfterRaiseTimer);
+    dockAfterRaiseTimer = null;
+  }
+}
+
+/** When always-on-top setting is off, eventually return to desktop-gadget z-order. */
+function scheduleDockAfterRaise(holdMs = 2800) {
+  cancelScheduledDock();
+  if (isAlwaysOnTop()) {
+    dockAfterRaiseDeadline = 0;
+    return;
+  }
+  const base = Math.max(2000, Number(holdMs) || 2800);
+  if (!dockAfterRaiseDeadline) dockAfterRaiseDeadline = Date.now() + base + 6_000;
+  dockAfterRaiseTimer = setTimeout(() => {
+    dockAfterRaiseTimer = null;
+    if (app.isQuitting || isAlwaysOnTop() || !overlayRaised) {
+      dockAfterRaiseDeadline = 0;
+      return;
+    }
+    if (isAppFocused() && Date.now() < dockAfterRaiseDeadline) {
+      scheduleDockAfterRaise(2000);
+      return;
+    }
+    dockAfterRaiseDeadline = 0;
+    void dockOverlay({ force: true });
+  }, base + 500);
 }
 
 function isAlwaysOnTop() {
@@ -212,34 +245,44 @@ async function withOverlayNotTop(fn) {
 
 function clearAlwaysOnTop() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  try {
-    overlayWindow.setAlwaysOnTop(false);
-    if (overlayWindow.isAlwaysOnTop()) {
-      overlayWindow.setAlwaysOnTop(true, "normal");
-      overlayWindow.setAlwaysOnTop(false);
+  // Electron can keep a previous level; clear across common levels.
+  const levels = [
+    undefined,
+    "normal",
+    "floating",
+    "torn-off-menu",
+    "modal-panel",
+    "main-menu",
+    "status",
+    "pop-up-menu",
+    "screen-saver",
+  ];
+  for (const level of levels) {
+    try {
+      if (level) overlayWindow.setAlwaysOnTop(false, level);
+      else overlayWindow.setAlwaysOnTop(false);
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 }
 
 function ensureOverlayOnScreen() {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  if (!overlayWindow || overlayWindow.isDestroyed() || overlayUserResizing) return;
   try {
     const current = overlayWindow.getBounds();
-    const next = clampBounds(current);
-    const tooHuge =
-      next.width > screen.getPrimaryDisplay().workArea.width * 0.85 ||
-      next.height > screen.getPrimaryDisplay().workArea.height * 0.85;
-    if (
-      tooHuge ||
-      next.x !== current.x ||
-      next.y !== current.y ||
-      next.width !== current.width ||
-      next.height !== current.height
-    ) {
-      overlayWindow.setBounds(tooHuge ? defaultOverlayBounds() : next);
-    }
+    const displays = screen.getAllDisplays();
+    const onScreen = displays.some((display) => {
+      const area = display.workArea;
+      const overlapX =
+        current.x < area.x + area.width - 40 &&
+        current.x + Math.min(current.width, 80) > area.x;
+      const overlapY =
+        current.y < area.y + area.height - 40 && current.y + 40 > area.y;
+      return overlapX && overlapY;
+    });
+    if (onScreen) return;
+    setOverlayBoundsProgrammatic(defaultOverlayBounds());
   } catch {
     // ignore
   }
@@ -288,17 +331,29 @@ function raiseOverlay({ focusOverlay = true, holdMs = 2800 } = {}) {
       }
     }
   }
-  if (!isAlwaysOnTop()) startFocusWatch();
-  else stopFocusWatch();
+  if (!isAlwaysOnTop()) {
+    startFocusWatch();
+    scheduleDockAfterRaise(holdMs);
+  } else {
+    stopFocusWatch();
+    cancelScheduledDock();
+  }
   // "raise" clears TOOLWINDOW / sets APPWINDOW so setSkipTaskbar(false) can stick.
+  const raiseGen = pinGeneration;
   void pinAsDesktopGadget(overlayWindow, "raise")
     .catch(() => undefined)
     .finally(() => {
-      if (!overlayWindow || overlayWindow.isDestroyed() || !overlayRaised) return;
+      if (!overlayWindow || overlayWindow.isDestroyed()) return;
+      if (!overlayRaised || raiseGen !== pinGeneration) return;
       try {
         if (!overlayWindow.isVisible()) overlayWindow.show();
-        overlayWindow.setAlwaysOnTop(true, "screen-saver");
-        if (focusOverlay) {
+        // Keep topmost only while intentionally raised (or permanent always-on-top).
+        if (isAlwaysOnTop() || overlayRaised) {
+          overlayWindow.setAlwaysOnTop(true, "screen-saver");
+        } else {
+          clearAlwaysOnTop();
+        }
+        if (focusOverlay && overlayRaised) {
           overlayWindow.focus();
           overlayWindow.moveTop();
         }
@@ -331,10 +386,12 @@ function startVisibilityWatch(ms = 15_000) {
     } catch {
       visible = false;
     }
-    if (visible && overlayRaised) return;
+    // Only recover when truly hidden — never re-raise a docked-but-visible gadget
+    // (that left Always-on-top stuck even with the setting off).
+    if (visible) return;
     kicks += 1;
     console.warn("Overlay nicht sichtbar — erneuter Raise", { kicks, visible, overlayRaised });
-    raiseOverlay({ holdMs: 8000 });
+    raiseOverlay({ holdMs: 5000 });
   }, 2500);
 }
 
@@ -457,6 +514,9 @@ async function dockOverlay({ force = false } = {}) {
   docking = true;
   overlayRaised = false;
   raiseHoldUntil = 0;
+  if (force) startupGraceUntil = 0;
+  cancelScheduledDock();
+  dockAfterRaiseDeadline = 0;
   stopFocusWatch();
   clearAlwaysOnTop();
   overlayWindow.show();
@@ -523,8 +583,8 @@ function stopFocusWatch() {
 }
 
 async function createOverlay() {
-  const saved = db.getMeta("overlay.bounds");
-  const bounds = saved ? clampBounds(JSON.parse(saved)) : defaultOverlayBounds();
+  migrateLegacyOverlayBounds();
+  const bounds = getBoundsForMode(isCompactMode());
   overlayWindow = new BrowserWindow({
     ...bounds,
     frame: false,
@@ -555,10 +615,17 @@ async function createOverlay() {
       void dockOverlay();
     }
   });
-  overlayWindow.on("moved", saveOverlayBounds);
+  let moveSaveTimer = null;
+  overlayWindow.on("moved", () => {
+    if (overlayUserResizing || skipBoundsSave > 0 || menuSpaceBackup) return;
+    if (moveSaveTimer) clearTimeout(moveSaveTimer);
+    moveSaveTimer = setTimeout(() => saveOverlayBounds(), 180);
+  });
   overlayWindow.on("will-resize", () => {
     if (overlayUserResizing) return;
     overlayUserResizing = true;
+    // Allow docking again soon — don't keep screen-saver topmost through a long grace.
+    startupGraceUntil = 0;
   });
   overlayWindow.on("resized", () => {
     overlayUserResizing = false;
@@ -579,10 +646,10 @@ async function createOverlay() {
   });
   overlayWindow.on("ready-to-show", () => {
     applyOpacity();
-    beginStartupGrace(12_000);
-    // Longer hold on cold start so Autostart / Explorer / Virtual Desktop don't bury it.
-    raiseOverlay({ holdMs: 10_000 });
-    startVisibilityWatch(18_000);
+    beginStartupGrace(4_000);
+    // Short hold on cold start so Autostart works without sticking forever on top.
+    raiseOverlay({ holdMs: 4_000 });
+    startVisibilityWatch(10_000);
   });
   // Fallback if ready-to-show never fires (stuck hidden process).
   setTimeout(() => {
@@ -593,9 +660,9 @@ async function createOverlay() {
       // continue
     }
     console.warn("ready-to-show Timeout — erzwinge Raise");
-    beginStartupGrace(12_000);
-    raiseOverlay({ holdMs: 10_000 });
-    startVisibilityWatch(18_000);
+    beginStartupGrace(4_000);
+    raiseOverlay({ holdMs: 4_000 });
+    startVisibilityWatch(10_000);
   }, 2500);
   overlayWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
     console.error("Preload-Fehler", preloadPath, error);
@@ -604,16 +671,116 @@ async function createOverlay() {
     const hasApi = await overlayWindow.webContents.executeJavaScript("Boolean(window.notesApi)");
     console.log("notesApi geladen:", hasApi);
     if (!overlayWindow.isVisible()) {
-      beginStartupGrace(12_000);
-      raiseOverlay({ holdMs: 10_000 });
+      beginStartupGrace(4_000);
+      raiseOverlay({ holdMs: 4_000 });
     }
   });
   loadRenderer(overlayWindow, { window: "overlay" });
 }
 
-function saveOverlayBounds() {
-  if (!overlayWindow) return;
-  db.setMeta("overlay.bounds", JSON.stringify(overlayWindow.getBounds()));
+const BOUNDS_KEY_COMPACT = "overlay.bounds.compact";
+const BOUNDS_KEY_EXPANDED = "overlay.bounds.expanded";
+const BOUNDS_KEY_LEGACY = "overlay.bounds";
+
+/** >0 while programmatic setBounds runs — moved/resized must not overwrite user sizes. */
+let skipBoundsSave = 0;
+/** Backup of overlay bounds while a context menu needs extra room. */
+let menuSpaceBackup = null;
+let overlayBoundsMigrated = false;
+/** True while the user is interactively resizing the overlay (will-resize → resized). */
+let overlayUserResizing = false;
+
+function isCompactMode() {
+  return db.getMeta("ui.compact") === "1";
+}
+
+function boundsKeyForMode(compact = isCompactMode()) {
+  return compact ? BOUNDS_KEY_COMPACT : BOUNDS_KEY_EXPANDED;
+}
+
+function parseBoundsJson(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const x = Number(parsed.x);
+    const y = Number(parsed.y);
+    const width = Number(parsed.width);
+    const height = Number(parsed.height);
+    if (![x, y, width, height].every((n) => Number.isFinite(n))) return null;
+    return { x, y, width, height };
+  } catch {
+    return null;
+  }
+}
+
+function readStoredBounds(key) {
+  return parseBoundsJson(db.getMeta(key));
+}
+
+function writeStoredBounds(key, bounds) {
+  if (!bounds) return null;
+  const clamped = clampBounds(bounds);
+  db.setMeta(key, JSON.stringify(clamped));
+  // Keep legacy single key aligned with the active mode for older tooling.
+  if (key === boundsKeyForMode()) {
+    db.setMeta(BOUNDS_KEY_LEGACY, JSON.stringify(clamped));
+  }
+  return clamped;
+}
+
+function migrateLegacyOverlayBounds() {
+  if (overlayBoundsMigrated) return;
+  overlayBoundsMigrated = true;
+  let compactBounds =
+    readStoredBounds(BOUNDS_KEY_COMPACT) || readStoredBounds("overlay.boundsCompact");
+  let expandedBounds =
+    readStoredBounds(BOUNDS_KEY_EXPANDED) || readStoredBounds("overlay.boundsExpanded");
+  const legacy = readStoredBounds(BOUNDS_KEY_LEGACY);
+  if (legacy) {
+    if (!compactBounds) compactBounds = legacy;
+    if (!expandedBounds) expandedBounds = legacy;
+  }
+  if (compactBounds) writeStoredBounds(BOUNDS_KEY_COMPACT, compactBounds);
+  if (expandedBounds) writeStoredBounds(BOUNDS_KEY_EXPANDED, expandedBounds);
+}
+
+function getBoundsForMode(compact = isCompactMode()) {
+  migrateLegacyOverlayBounds();
+  const stored = readStoredBounds(boundsKeyForMode(compact));
+  if (stored) return clampBounds(stored);
+  const other = readStoredBounds(boundsKeyForMode(!compact));
+  if (other) return clampBounds(other);
+  const legacy = readStoredBounds(BOUNDS_KEY_LEGACY);
+  if (legacy) return clampBounds(legacy);
+  return defaultOverlayBounds();
+}
+
+function withSkipBoundsSave(fn) {
+  skipBoundsSave += 1;
+  try {
+    return fn();
+  } finally {
+    // Electron may emit moved/resized after setBounds returns.
+    setTimeout(() => {
+      skipBoundsSave = Math.max(0, skipBoundsSave - 1);
+    }, 50);
+  }
+}
+
+function setOverlayBoundsProgrammatic(bounds) {
+  if (!overlayWindow || overlayWindow.isDestroyed() || !bounds) return;
+  withSkipBoundsSave(() => {
+    overlayWindow.setBounds(clampBounds(bounds));
+  });
+}
+
+function saveOverlayBounds({ modeCompact = isCompactMode(), force = false } = {}) {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  if (!force && (skipBoundsSave > 0 || menuSpaceBackup || overlayUserResizing)) return;
+  // Persist only — never setBounds here (that fights live user resize and flickers).
+  const bounds = clampBounds(overlayWindow.getBounds());
+  writeStoredBounds(boundsKeyForMode(modeCompact), bounds);
 }
 
 function startupVbsPath() {
@@ -819,7 +986,14 @@ function setAlwaysOnTopEnabled(enabled) {
     raiseOverlay();
     return;
   }
-  if (overlayRaised) startFocusWatch();
+  // Setting off must leave desktop-gadget mode, not a stuck screen-saver topmost window.
+  stopVisibilityWatch();
+  cancelScheduledDock();
+  dockAfterRaiseDeadline = 0;
+  raiseHoldUntil = 0;
+  startupGraceUntil = 0;
+  clearAlwaysOnTop();
+  void dockOverlay({ force: true });
 }
 
 function setPreviewSplit(value) {
@@ -839,9 +1013,6 @@ const COMPACT_MIN_HEIGHT = 160;
 /** Keep low so the window can shrink into auto-compact (< 400×300). */
 const DEFAULT_MIN_WIDTH = 220;
 const DEFAULT_MIN_HEIGHT = 200;
-
-/** True while the user is interactively resizing the overlay (will-resize → resized). */
-let overlayUserResizing = false;
 
 function shrinkOverlayToNotes(size) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
@@ -869,7 +1040,8 @@ function shrinkOverlayToNotes(size) {
   let width = bounds.width;
   let height = bounds.height;
   if (forceHeight) {
-    width = bounds.width > preferredWidth ? bounds.width : preferredWidth;
+    // Explicit minimize: snap to the notes strip (card width + chrome), not the wide expanded frame.
+    width = preferredWidth;
     height = preferredHeight;
   } else {
     // Auto-compact: only lift true floors, never snap to preferred fit size.
@@ -877,31 +1049,82 @@ function shrinkOverlayToNotes(size) {
     if (height < minHeight) height = minHeight;
   }
   const nextBounds = clampBounds({ ...bounds, width, height });
-  if (bounds.width === nextBounds.width && bounds.height === nextBounds.height) return;
-  overlayWindow.setBounds(nextBounds);
+  if (bounds.width === nextBounds.width && bounds.height === nextBounds.height) {
+    if (forceHeight) saveOverlayBounds({ modeCompact: true, force: true });
+    return;
+  }
+  setOverlayBoundsProgrammatic(nextBounds);
+  if (forceHeight) {
+    // Persist the fitted compact size the user will see after a forced compact.
+    writeStoredBounds(BOUNDS_KEY_COMPACT, nextBounds);
+    db.setMeta(BOUNDS_KEY_LEGACY, JSON.stringify(nextBounds));
+  }
 }
 
-function clearCompactMode() {
+function boundsMeaningfullyLarger(candidate, current) {
+  if (!candidate || !current) return false;
+  return candidate.width >= current.width + 60 || candidate.height >= current.height + 60;
+}
+
+function clearCompactMode({ restoreBounds = false } = {}) {
+  const wasCompact = isCompactMode();
+  if (wasCompact && overlayWindow && !overlayWindow.isDestroyed() && !menuSpaceBackup) {
+    saveOverlayBounds({ modeCompact: true, force: true });
+  }
   setCompactMode(false);
   if (!overlayWindow || overlayWindow.isDestroyed()) return getSettings();
   overlayWindow.setMinimumSize(DEFAULT_MIN_WIDTH, DEFAULT_MIN_HEIGHT);
-  return getSettings();
-}
-
-function expandOverlayChrome() {
-  clearCompactMode();
-  if (!overlayWindow || overlayWindow.isDestroyed()) return getSettings();
-  const bounds = overlayWindow.getBounds();
-  const width = Math.max(bounds.width, 640);
-  const height = Math.max(bounds.height, 480);
-  if (width !== bounds.width || height !== bounds.height) {
-    overlayWindow.setBounds(clampBounds({ ...bounds, width, height }));
+  if (wasCompact && restoreBounds) {
+    const current = overlayWindow.getBounds();
+    const stored = readStoredBounds(BOUNDS_KEY_EXPANDED);
+    if (stored && boundsMeaningfullyLarger(stored, current)) {
+      setOverlayBoundsProgrammatic(clampBounds(stored));
+    } else {
+      const def = defaultOverlayBounds();
+      const next = clampBounds({
+        x: current.x,
+        y: current.y,
+        width: Math.max(current.width, def.width, 640),
+        height: Math.max(current.height, def.height, 480),
+      });
+      setOverlayBoundsProgrammatic(next);
+      writeStoredBounds(BOUNDS_KEY_EXPANDED, next);
+    }
+  } else if (wasCompact) {
+    // Keep current on-screen size as expanded (user grew the frame manually).
+    saveOverlayBounds({ modeCompact: false, force: true });
   }
   return getSettings();
 }
 
-/** Backup of overlay bounds while a context menu needs extra room. */
-let menuSpaceBackup = null;
+function expandOverlayChrome() {
+  if (menuSpaceBackup) restoreOverlayMenuSpace();
+  if (!overlayWindow || overlayWindow.isDestroyed()) return getSettings();
+
+  // Save compact size only — never overwrite expanded with the small frame first.
+  if (isCompactMode() && !menuSpaceBackup) {
+    saveOverlayBounds({ modeCompact: true, force: true });
+  }
+  const current = overlayWindow.getBounds();
+  const stored = readStoredBounds(BOUNDS_KEY_EXPANDED);
+  setCompactMode(false);
+  overlayWindow.setMinimumSize(DEFAULT_MIN_WIDTH, DEFAULT_MIN_HEIGHT);
+
+  if (stored && boundsMeaningfullyLarger(stored, current)) {
+    setOverlayBoundsProgrammatic(clampBounds(stored));
+  } else {
+    const def = defaultOverlayBounds();
+    const next = clampBounds({
+      x: current.x,
+      y: current.y,
+      width: Math.max(current.width, def.width, 640),
+      height: Math.max(current.height, def.height, 480),
+    });
+    setOverlayBoundsProgrammatic(next);
+    writeStoredBounds(BOUNDS_KEY_EXPANDED, next);
+  }
+  return getSettings();
+}
 
 function fitOverlayMenuSpace(payload) {
   if (!overlayWindow || overlayWindow.isDestroyed()) return null;
@@ -935,7 +1158,7 @@ function fitOverlayMenuSpace(payload) {
   if (x < wa.x) x = wa.x;
   if (y < wa.y) y = wa.y;
 
-  overlayWindow.setBounds({ x, y, width, height });
+  setOverlayBoundsProgrammatic({ x, y, width, height });
   return { x, y, width, height };
 }
 
@@ -944,7 +1167,7 @@ function restoreOverlayMenuSpace() {
   const backup = menuSpaceBackup;
   menuSpaceBackup = null;
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.setBounds(backup);
+  setOverlayBoundsProgrammatic(backup);
 }
 
 function closeCtxMenu() {
@@ -1175,6 +1398,8 @@ function quitApp() {
   stopDockLoop();
   stopFocusWatch();
   stopVisibilityWatch();
+  cancelScheduledDock();
+  dockAfterRaiseDeadline = 0;
   try {
     overlayWindow?.setClosable(true);
   } catch {
@@ -1393,13 +1618,47 @@ function registerIpc() {
   ipcMain.handle("overlay:raise", () => raiseOverlay());
   ipcMain.handle("overlay:setCompact", (_e, payload) => {
     const enabled = Boolean(payload?.enabled);
+    const wasCompact = isCompactMode();
+    const restoreBounds = Boolean(payload?.restoreBounds);
+    const forceHeight = Boolean(payload?.forceHeight);
+    if (menuSpaceBackup) restoreOverlayMenuSpace();
+    if (enabled !== wasCompact && overlayWindow && !overlayWindow.isDestroyed()) {
+      // Persist the leaving mode before flipping (current on-screen size).
+      saveOverlayBounds({ modeCompact: wasCompact, force: true });
+    }
     setCompactMode(enabled, { locked: Boolean(payload?.locked) });
-    if (enabled && (payload?.width || payload?.height || payload?.minHeight || payload?.forceHeight)) {
-      shrinkOverlayToNotes(payload);
+    if (!overlayWindow || overlayWindow.isDestroyed()) return getSettings();
+    if (enabled) {
+      const minHeight = Math.max(
+        COMPACT_MIN_HEIGHT,
+        Math.round(Number(payload?.minHeight) || COMPACT_MIN_HEIGHT),
+      );
+      overlayWindow.setMinimumSize(COMPACT_MIN_WIDTH, minHeight);
+      if (forceHeight) {
+        // Explicit collapse: fit to notes.
+        shrinkOverlayToNotes(payload);
+      } else if (restoreBounds && wasCompact !== enabled) {
+        setOverlayBoundsProgrammatic(getBoundsForMode(true));
+      } else {
+        // Auto-compact / size floors only — never snap back to a stored size mid-resize.
+        if (payload?.width || payload?.height || payload?.minHeight) {
+          shrinkOverlayToNotes({ ...payload, forceHeight: false });
+        }
+        saveOverlayBounds({ modeCompact: true, force: true });
+      }
+    } else {
+      overlayWindow.setMinimumSize(DEFAULT_MIN_WIDTH, DEFAULT_MIN_HEIGHT);
+      if (restoreBounds && wasCompact !== enabled) {
+        setOverlayBoundsProgrammatic(getBoundsForMode(false));
+      } else {
+        saveOverlayBounds({ modeCompact: false, force: true });
+      }
     }
     return getSettings();
   });
-  ipcMain.handle("overlay:clearCompact", () => clearCompactMode());
+  ipcMain.handle("overlay:clearCompact", (_e, payload) =>
+    clearCompactMode({ restoreBounds: Boolean(payload?.restoreBounds) }),
+  );
   ipcMain.handle("overlay:expandChrome", () => expandOverlayChrome());
   ipcMain.handle("overlay:fitMenuSpace", (_e, payload) => fitOverlayMenuSpace(payload));
   ipcMain.handle("overlay:restoreMenuSpace", () => {
@@ -1495,9 +1754,9 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    beginStartupGrace(10_000);
-    raiseOverlay({ holdMs: 8000 });
-    startVisibilityWatch(12_000);
+    beginStartupGrace(4_000);
+    raiseOverlay({ holdMs: 4_000 });
+    startVisibilityWatch(8_000);
     try {
       tray?.displayBalloon?.({
         title: "Desktop Notes",
